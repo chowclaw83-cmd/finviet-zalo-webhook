@@ -169,8 +169,8 @@ def health():
 def zalo_verify(verifier_path):
     """Zalo 域名归属验证 - 返回完整 HTML 验证文件"""
     if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
-        # 从文件名提取 token (去掉 .html 后缀)
-        token = verifier_path.replace('.html', '')
+        # 从文件名提取 token: zalo_verifierTOKEN.html → TOKEN
+        token = verifier_path.replace('zalo_verifier', '').replace('.html', '')
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
