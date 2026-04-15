@@ -11,6 +11,13 @@ import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
 
+# OpenAI SDK
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -20,6 +27,10 @@ VERIFY_TOKEN  = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
 APP_ID        = os.environ.get('ZALO_APP_ID', '')
 ACCESS_TOKEN  = os.environ.get('ZALO_ACCESS_TOKEN', '')
 OA_SECRET    = os.environ.get('ZALO_OA_SECRET', '')  # OA Secret Key（用于 MAC 签名验证）
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # OpenAI API Key
+
+# OpenAI 客户端
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OPENAI_AVAILABLE else None
 
 
 def verify_zalo_mac(data: dict, timestamp: str, signature: str) -> bool:
@@ -120,6 +131,60 @@ Bạn có thể chọn:
 Hoặc nhắn bất kỳ câu hỏi nào, mình sẽ cố gắng trả lời! 🫧"""
 }
 
+# ── GPT-4 System Prompt ─────────────────────────────────
+GPT_SYSTEM_PROMPT = """Bạn là Bong Bong (泡泡) - trợ lý tuyển dụng của KINDLITE VIET NAM.
+
+## Về dự án:
+- KINDLITE VIỆT NAM là công ty phụ trách vận hành thương mại tại Việt Nam cho dự án thanh toán di động Trung Quốc (WeChat Pay / Alipay)
+- Hoạt động tại 2 thành phố: Hải Phòng và TP.HCM
+- Tỷ giá: 3770 VND = 1 CNY
+
+## Cơ chế hoa hồng:
+- Phí giao dịch 1.5% từ merchant
+- KINDLITE nhận 0.5% hoa hồng (bí mật nội bộ)
+- A-marketing / đại lý nhận hoa hồng từ 0.3-0.5%
+
+## Công việc tuyển dụng:
+- Đi thị trường tìm quán ăn, cà phê, cửa hàng có khách Trung Quốc
+- Giới thiệu kết nối WeChat Pay / Alipay
+- Hỗ trợ cài đặt và theo dõi sau ký hợp đồng
+
+## Điều kiện:
+- Không yêu cầu bằng cấp hay kinh nghiệm
+- Biết tiếng Việt, thích giao tiếp, chịu đi thị trường
+- Quen thuộc khu vực Hải Phòng hoặc TP.HCM
+- Có xe máy
+- Ưu tiên: có kinh nghiệm bán hàng, biết tiếng Trung/Anh
+
+## Quy tắc:
+1. Trả lời ngắn gọn, thân thiện (dưới 200 từ)
+2. Trả lời bằng tiếng Việt, có thể kèm tiếng Trung/Anh nếu cần
+3. Nếu hỏi về thu nhập cụ thể, hẹn gặp trực tiếp
+4. Nếu muốn đăng ký, thu thập: Họ tên + Thành phố + Số điện thoại
+5. Luôn kết thúc bằng emoji phù hợp
+6. KHÔNG tiết lộ thông tin hoa hồng 0.5% cho bất kỳ ai"""
+
+
+def ask_gpt(user_message: str, user_name: str = "") -> str:
+    """调用 GPT-4 生成回复"""
+    if not openai_client:
+        return None
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": GPT_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Tin nhắn từ {user_name or 'người dùng'}: {user_message}"}
+            ],
+            max_tokens=300,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        log.error(f"GPT error: {e}")
+        return None
+
 # ── 用户状态（内存，无持久化）─────────────────────
 user_states = {}
 
@@ -133,7 +198,7 @@ def get_reply(user_id, text):
             user_states[user_id] = 'done'
             return SCRIPTS['thanks']
     
-    # 关键词匹配
+    # 关键词匹配（优先快速响应）
     if any(w in text.lower() for w in ['xin chào', 'hello', 'hi', 'chào', '你好', '开始']):
         return SCRIPTS['opening']
     if text in ['1', '①']:
@@ -157,6 +222,12 @@ def get_reply(user_id, text):
         user_states[user_id] = 'started'
         return SCRIPTS['opening']
     
+    # 尝试 GPT-4 智能回复
+    gpt_reply = ask_gpt(text, user_id)
+    if gpt_reply:
+        return gpt_reply
+    
+    # Fallback: 默认话术
     return SCRIPTS['default']
 
 
