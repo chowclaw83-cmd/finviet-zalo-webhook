@@ -213,13 +213,14 @@ There Is No Limit To What You Can Accomplish Using Zalo!
 
 @app.route('/webhook', methods=['GET'])
 def webhook_verify():
-    """Zalo webhook 验证 - 支持两种参数格式"""
-    # Zalo 官方格式
+    """Zalo webhook 验证"""
     mode      = request.args.get('mode') or request.args.get('hub.mode')
     token     = request.args.get('VerifyToken') or request.args.get('hub.verify_token')
     challenge = request.args.get('challenge') or request.args.get('hub.challenge')
     if mode == 'subscribe' and token == VERIFY_TOKEN:
-        return challenge, 200
+        resp = jsonify(challenge)
+        resp.status_code = 200
+        return resp
     return 'Forbidden', 403
 
 
