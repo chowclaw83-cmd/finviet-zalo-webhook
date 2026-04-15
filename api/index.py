@@ -24,19 +24,26 @@ OA_SECRET    = os.environ.get('ZALO_OA_SECRET', '')  # OA Secret Key（用于 MA
 
 
 def verify_zalo_mac(data: dict, timestamp: str, signature: str) -> bool:
-    """验证 Zalo webhook MAC 签名"""
+    """验证 Zalo webhook MAC 签名
+    
+    Zalo 公式: raw = app_id + JSON.stringify(body) + timestamp + oa_secret
+    其中 body 不包含 signature 字段本身
+    """
     if not OA_SECRET or not signature:
         log.warning("No OA_SECRET or signature, skip MAC verification")
         return True  # 跳过验证以便调试
-    raw = APP_ID + json.dumps(data, separators=(',', ':')) + timestamp + OA_SECRET
-    expected = hmac.new(
-        OA_SECRET.encode(),
-        raw.encode(),
-        hashlib.sha256
-    ).hexdigest()
+    
+    # JSON 序列化时排除 signature 字段（如果存在）
+    body_for_sign = {k: v for k, v in data.items() if k != 'signature'}
+    body_json = json.dumps(body_for_sign, separators=(',', ':'))
+    
+    # 按正确顺序拼接：app_id + body_json + timestamp + oa_secret
+    raw = str(APP_ID) + body_json + timestamp + OA_SECRET
+    expected = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+    
     ok = hmac.compare_digest(expected, signature)
     if not ok:
-        log.warning(f"MAC mismatch: expected={expected[:20]}..., got={signature[:20]}...")
+        log.warning(f"MAC mismatch:\n  raw={raw[:100]}\n  expected={expected}\n  got={signature}")
     return ok
 
 # ── 话术库 ─────────────────────────────────────────
