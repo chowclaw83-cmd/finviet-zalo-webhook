@@ -230,17 +230,24 @@ def webhook_verify():
 def webhook_receive():
     """接收 Zalo 推送事件 - 必须 <2s 内响应，否则 Zalo 认为失败"""
     try:
-        data = request.get_json(force=True)
+        # 先获取原始请求体（MAC 验证需要原始 JSON）
+        raw_body = request.get_data()
+        data = json.loads(raw_body)  # 用原始 body 解析
         log.info(f"Event: {json.dumps(data)[:200]}")
 
-        # MAC 签名验证（暂时禁用，调试通过后再启用）
-        # signature = request.headers.get('X-Zalo-Signature', '') or \
-        #             request.headers.get('X-ZEvent-Signature', '')
-        # timestamp = str(data.get('timestamp', ''))
-        # if signature and OA_SECRET and not signature.startswith('test'):
-        #     if not verify_zalo_mac(data, timestamp, signature):
-        #         log.warning("Invalid MAC signature, ignoring event")
-        #         return jsonify({'error': 'Invalid signature'}), 403
+        # MAC 签名验证
+        # Zalo 公式: raw = app_id + raw_request_body + body.timestamp + oa_secret
+        signature = request.headers.get('X-Zalo-Signature', '') or \
+                    request.headers.get('X-ZEvent-Signature', '')
+        if signature and OA_SECRET and not signature.startswith('test'):
+            timestamp = data.get('timestamp', 0)
+            raw = str(APP_ID).encode('utf-8') + raw_body + str(timestamp).encode('utf-8') + OA_SECRET.encode('utf-8')
+            expected = hashlib.sha256(raw).hexdigest()
+            ok = hmac.compare_digest(expected, signature)
+            log.info(f"MAC: received={signature[:16]}, expected={expected[:16]}")
+            if not ok:
+                log.warning("MAC mismatch, ignoring event")
+                return jsonify({'error': 'Invalid signature'}), 403
 
         event_name = data.get('event_name', '')
 
