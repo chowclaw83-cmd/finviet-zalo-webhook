@@ -165,9 +165,12 @@ def health():
     return jsonify({'status': 'ok', 'time': datetime.now().isoformat()})
 
 
-@app.route('/zalo_verifier_1501034389927564920.html', methods=['GET'])
-def zalo_verify():
-    return 'zalo_verifier_1501034389927564920', 200, {'Content-Type': 'text/plain'}
+@app.route('/<path:verifier_path>', methods=['GET'])
+def zalo_verify(verifier_path):
+    """Zalo 域名归属验证 - 动态处理所有验证文件请求"""
+    if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
+        return verifier_path, 200, {'Content-Type': 'text/plain'}
+    return 'Not Found', 404
 
 
 @app.route('/webhook', methods=['GET'])
