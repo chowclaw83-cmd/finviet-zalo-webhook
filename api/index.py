@@ -167,9 +167,20 @@ def health():
 
 @app.route('/<path:verifier_path>', methods=['GET'])
 def zalo_verify(verifier_path):
-    """Zalo 域名归属验证 - 动态处理所有验证文件请求"""
+    """Zalo 域名归属验证 - 返回完整 HTML 验证文件"""
     if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
-        return verifier_path, 200, {'Content-Type': 'text/plain'}
+        # 从文件名提取 token (去掉 .html 后缀)
+        token = verifier_path.replace('.html', '')
+        html_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta property="zalo-platform-site-verification" content="{token}" />
+</head>
+<body>
+There Is No Limit To What You Can Accomplish Using Zalo!
+</body>
+</html>'''
+        return html_content, 200, {'Content-Type': 'text/html'}
     return 'Not Found', 404
 
 
