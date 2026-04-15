@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import requests
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 
@@ -14,9 +15,9 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── 配置 ──────────────────────────────────────────
-VERIFY_TOKEN = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
-APP_ID       = os.environ.get('ZALO_APP_ID', '')
-ACCESS_TOKEN = os.environ.get('ZALO_ACCESS_TOKEN', '')
+VERIFY_TOKEN  = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
+APP_ID        = os.environ.get('ZALO_APP_ID', '')
+ACCESS_TOKEN  = os.environ.get('ZALO_ACCESS_TOKEN', '')
 
 # ── 话术库 ─────────────────────────────────────────
 SCRIPTS = {
@@ -133,8 +134,8 @@ def get_reply(user_id, text):
     return SCRIPTS['default']
 
 
-def send_message(user_id, text):
-    """通过 Zalo API 发送消息"""
+def _do_send_message(user_id, text):
+    """实际发送消息到 Zalo API（后台执行）"""
     if not ACCESS_TOKEN:
         log.warning("No ACCESS_TOKEN set, skip sending")
         return
@@ -148,10 +149,16 @@ def send_message(user_id, text):
         "message": {"text": text}
     }
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
         log.info(f"Send msg to {user_id}: {r.status_code} {r.text[:100]}")
     except Exception as e:
         log.error(f"Send failed: {e}")
+
+
+def send_message_async(user_id, text):
+    """异步发送消息，立即返回，不阻塞 webhook 响应"""
+    thread = threading.Thread(target=_do_send_message, args=(user_id, text))
+    thread.start()
 
 
 # ── 路由 ───────────────────────────────────────────
@@ -197,26 +204,32 @@ def webhook_verify():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    """接收 Zalo 推送事件"""
+    """接收 Zalo 推送事件 - 必须 <2s 内响应，否则 Zalo 认为失败"""
     try:
         data = request.get_json(force=True)
         log.info(f"Event: {json.dumps(data)[:200]}")
-        
+
         event_name = data.get('event_name', '')
-        
+
+        # ✅ 立即返回 200，避免 Zalo 超时
+        # 消息发送放到后台线程，不阻塞响应
         if event_name == 'user_send_text':
             user_id = data.get('sender', {}).get('id', '')
             text    = data.get('message', {}).get('text', '')
             if user_id and text:
                 reply = get_reply(user_id, text)
-                send_message(user_id, reply)
-        
+                send_message_async(user_id, reply)
+
         elif event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
             if user_id:
-                send_message(user_id, SCRIPTS['opening'])
-        
+                send_message_async(user_id, SCRIPTS['opening'])
+
+        elif event_name == 'unfollow':
+            log.info(f"User unfollowed OA")
+
     except Exception as e:
         log.error(f"Webhook error: {e}")
-    
+
+    # 立即返回，不等待消息发送完成
     return jsonify({'status': 'ok'})
