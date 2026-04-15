@@ -168,9 +168,11 @@ GPT_SYSTEM_PROMPT = """Bạn là Bong Bong (泡泡) - trợ lý tuyển dụng c
 def ask_gpt(user_message: str, user_name: str = "") -> str:
     """调用 GPT-4 生成回复"""
     if not openai_client:
+        log.warning("OpenAI client not initialized")
         return None
     
     try:
+        log.info(f"Calling OpenAI API...")
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -180,7 +182,9 @@ def ask_gpt(user_message: str, user_name: str = "") -> str:
             max_tokens=300,
             temperature=0.7
         )
-        return response.choices[0].message.content.strip()
+        reply = response.choices[0].message.content.strip()
+        log.info(f"GPT success: {reply[:50]}")
+        return reply
     except Exception as e:
         log.error(f"GPT error: {e}")
         return None
@@ -223,9 +227,12 @@ def get_reply(user_id, text):
         return SCRIPTS['opening']
     
     # 尝试 GPT-4 智能回复
+    log.info(f"Trying GPT for: {text[:50]}")
     gpt_reply = ask_gpt(text, user_id)
     if gpt_reply:
+        log.info(f"GPT reply: {gpt_reply[:50]}")
         return gpt_reply
+    log.warning("GPT returned None, using default")
     
     # Fallback: 默认话术
     return SCRIPTS['default']
