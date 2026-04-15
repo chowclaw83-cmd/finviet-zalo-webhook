@@ -5,6 +5,8 @@ Finviet Zalo OA Webhook - Vercel Serverless
 import os
 import json
 import logging
+import hmac
+import hashlib
 import requests
 import threading
 from datetime import datetime
@@ -18,6 +20,24 @@ log = logging.getLogger(__name__)
 VERIFY_TOKEN  = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
 APP_ID        = os.environ.get('ZALO_APP_ID', '')
 ACCESS_TOKEN  = os.environ.get('ZALO_ACCESS_TOKEN', '')
+OA_SECRET    = os.environ.get('ZALO_OA_SECRET', '')  # OA Secret Key（用于 MAC 签名验证）
+
+
+def verify_zalo_mac(data: dict, timestamp: str, signature: str) -> bool:
+    """验证 Zalo webhook MAC 签名"""
+    if not OA_SECRET or not signature:
+        log.warning("No OA_SECRET or signature, skip MAC verification")
+        return True  # 跳过验证以便调试
+    raw = APP_ID + json.dumps(data, separators=(',', ':')) + timestamp + OA_SECRET
+    expected = hmac.new(
+        OA_SECRET.encode(),
+        raw.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    ok = hmac.compare_digest(expected, signature)
+    if not ok:
+        log.warning(f"MAC mismatch: expected={expected[:20]}..., got={signature[:20]}...")
+    return ok
 
 # ── 话术库 ─────────────────────────────────────────
 SCRIPTS = {
@@ -209,6 +229,15 @@ def webhook_receive():
     try:
         data = request.get_json(force=True)
         log.info(f"Event: {json.dumps(data)[:200]}")
+
+        # MAC 签名验证（Zalo OA 真实消息必须有签名）
+        signature = request.headers.get('X-Zalo-Signature', '') or \
+                    request.headers.get('X-ZEvent-Signature', '')
+        timestamp = str(data.get('timestamp', ''))
+        if signature and OA_SECRET:
+            if not verify_zalo_mac(data, timestamp, signature):
+                log.warning("Invalid MAC signature, ignoring event")
+                return jsonify({'error': 'Invalid signature'}), 403
 
         event_name = data.get('event_name', '')
 
