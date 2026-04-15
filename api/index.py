@@ -8,7 +8,6 @@ import logging
 import hmac
 import hashlib
 import requests
-import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 
@@ -161,31 +160,27 @@ def get_reply(user_id, text):
     return SCRIPTS['default']
 
 
-def _do_send_message(user_id, text):
-    """实际发送消息到 Zalo API（后台执行）"""
+def send_zalo_message(user_id: str, text: str):
+    """发送消息到 Zalo OA（同步方式，Vercel serverless 友好）"""
     if not ACCESS_TOKEN:
         log.warning("No ACCESS_TOKEN set, skip sending")
-        return
+        return False
     url = "https://openapi.zalo.me/v3.0/oa/message/cs"
     headers = {
         'access_token': ACCESS_TOKEN,
         'Content-Type': 'application/json'
     }
     payload = {
-        "recipient": {"user_id": user_id},
+        "recipient": {"user_id": str(user_id)},
         "message": {"text": text}
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=15)
-        log.info(f"Send msg to {user_id}: {r.status_code} {r.text[:100]}")
+        log.info(f"Send msg to {user_id}: {r.status_code} {r.text[:200]}")
+        return r.status_code == 200
     except Exception as e:
         log.error(f"Send failed: {e}")
-
-
-def send_message_async(user_id, text):
-    """异步发送消息，立即返回，不阻塞 webhook 响应"""
-    thread = threading.Thread(target=_do_send_message, args=(user_id, text))
-    thread.start()
+        return False
 
 
 # ── 路由 ───────────────────────────────────────────
@@ -250,18 +245,21 @@ def webhook_receive():
         event_name = data.get('event_name', '')
 
         # ✅ 立即返回 200，避免 Zalo 超时
-        # 消息发送放到后台线程，不阻塞响应
+        # 消息发送同步执行（Vercel serverless 不支持 threading）
         if event_name == 'user_send_text':
             user_id = data.get('sender', {}).get('id', '')
             text    = data.get('message', {}).get('text', '')
+            log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
             if user_id and text:
                 reply = get_reply(user_id, text)
-                send_message_async(user_id, reply)
+                log.info(f"Reply: {reply[:50]}")
+                send_zalo_message(user_id, reply)
 
         elif event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
+            log.info(f"follow event: user_id={user_id}")
             if user_id:
-                send_message_async(user_id, SCRIPTS['opening'])
+                send_zalo_message(user_id, SCRIPTS['opening'])
 
         elif event_name == 'unfollow':
             log.info(f"User unfollowed OA")
