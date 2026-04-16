@@ -29,8 +29,14 @@ ACCESS_TOKEN  = os.environ.get('ZALO_ACCESS_TOKEN', '')
 OA_SECRET    = os.environ.get('ZALO_OA_SECRET', '')  # OA Secret Key（用于 MAC 签名验证）
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # OpenAI API Key
 
-# OpenAI 客户端
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OPENAI_AVAILABLE else None
+# OpenAI 客户端（使用 GPTsAPI 兼容接口）
+if OPENAI_API_KEY and OPENAI_AVAILABLE:
+    openai_client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url="https://api.gptsapi.net/v1"
+    )
+else:
+    openai_client = None
 
 
 def verify_zalo_mac(data: dict, timestamp: str, signature: str) -> bool:
