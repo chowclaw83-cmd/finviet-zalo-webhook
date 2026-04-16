@@ -213,15 +213,13 @@ Bạn hoàn toàn yên tâm nhé! 😊""",
     # ═══════════════════════════════════════════
     # 二、收中日韩游客的钱
     # ═══════════════════════════════════════════
-    "khách trung quốc": """Đúng rồi! Khách Trung Quốc, Hàn Quốc, Nhật Bản... họ đã quen với thanh toán không tiền mặt bằng WeChat Pay, Alipay, KakaoPay trên điện thoại.
+    "khách trung quốc": """Bên em đang giúp anh/chị giải quyết một vấn đề rất thực tế: khách Trung Quốc, Hàn Quốc, Nhật Bản họ quen thanh toán không tiền mặt bằng Alipay, WeChat, Kakao nên điện thoại lúc nào cũng có mấy hình thức này.
 
-📍 Nếu cửa hàng bạn có mã QR thanh toán quốc tế:
-- Khách quét mã → Thanh toán ngay → Tiền về tài khoản ngân hàng của bạn
-- Khách thoải mái chi tiêu, không cần đổi tiền
+Nếu cửa hàng mình nhận được mấy hình thức này, khách có thể quét mã và thanh toán ngay tại quán mình.
 
-💡 Nhiều cửa hàng bán đồ ăn, cà phê... ở Sài Gòn, Hải Phòng đã dùng và thu thêm được hàng triệu đồng mỗi tháng!
+Cách anh/chị đang nhận tiền hiện tại không bị ảnh hưởng gì hết, bên em chỉ bổ sung thêm một cách nhận tiền từ khách nước ngoài thôi.
 
-Bạn muốn tìm hiểu cách đăng ký không? 😊""",
+Mình cứ dùng thử trước, có khách là có thêm doanh thu, còn nếu khách tới mà không thanh toán được thì họ sẽ đi chỗ khác.""",
 
     "thanh toán quốc tế": """Finviet giúp bạn nhận tiền từ khách du lịch Trung Quốc, Hàn Quốc, Nhật Bản một cách dễ dàng và hợp pháp.
 
@@ -258,12 +256,15 @@ Bạn đăng ký đi, rất đơn giản! 🫧""",
     # ═══════════════════════════════════════════
     # 三、钱怎么到账 / NAPAS / 银行
     # ═══════════════════════════════════════════
-    "tiền về": """Tiền thanh toán sẽ đi qua hệ thống NAPAS (do Ngân hàng Nhà nước Việt Nam vận hành), sau đó tự động chuyển vào tài khoản ngân hàng của bạn.
+    "tiền về": """【多久到账？】
+用 ECO 的话，及时到账；
+本地 VietQR，当天 23:00 之前收款，T+1，即第二天到账；
+用跨境 VietQR Global，当天 23:00 之前收款，T+2，即第三天到账。
 
-🏦 Giống như thẻ ATM quẹt thẻ quốc tế - tiền về ngay tài khoản
-📱 Nếu tải ECO, bạn xem được số dư real-time như Momo/ZaloPay
-
-An toàn, nhanh, không lo mất tiền! ✅""",
+Bao lâu nhận tiền？
+Dùng ECO thì nhận tiền ngay；
+VietQR nội địa, thu tiền trước 23:00 cùng ngày, T+1, tức ngày hôm sau；
+VietQR Global quốc tế, thu tiền trước 23:00 cùng ngày, T+2, tức ngày thứ ba.""",
 
     "ngân hàng": """Tiền thanh toán được xử lý qua NAPAS - hệ thống thanh toán quốc gia của Việt Nam, rồi tự động chuyển vào tài khoản ngân hàng của bạn.
 
@@ -273,26 +274,17 @@ An toàn, nhanh, không lo mất tiền! ✅""",
 
 Bạn dùng ngân hàng nào? Vietcombank, VietinBank, BIDV...? 😊""",
 
-    "napas": """NAPAS là hệ thống thanh toán điện tử liên ngân hàng của Việt Nam, do Ngân hàng Nhà nước quản lý.
+    "napas": """Tiền sẽ đi qua hệ thống Ngân hàng Nhà nước và chuyển thẳng về tài khoản ngân hàng của anh/chị.
 
-🏦 Khi khách quét mã thanh toán quốc tế:
-→ Tiền đi qua NAPAS
-→ Quy đổi ra VNĐ theo tỷ giá thị trường
-→ Vào tài khoản ngân hàng của bạn
+Bên em dùng hệ thống NAPAS. Nếu là chủ Trung Quốc thì có thể hiểu giống UnionPay. Nếu là chủ Hàn Quốc thì giống KFTC.
 
-📱 Nếu bạn dùng VietQR thường thì biết rồi - VietQR Global của bên mình là phiên bản quốc tế của NAPAS, dùng để nhận tiền từ khách nước ngoài
+VietQR là mã thanh toán tiêu chuẩn thu tiền nội địa của NAPAS mà mình hay thấy. Còn mã bên em là VietQR Global: dùng để nhận tiền từ khách quốc tế, tức là tiêu chuẩn thu tiền quốc tế của NAPAS.
 
-An toàn và hợp pháp 100%! ✅""",
+Người nước ngoài quét mã thanh toán, tiền đi qua hệ thống Ngân hàng Nhà nước Việt Nam, sẽ tự động chuyển vào tài khoản ngân hàng của anh/chị. Nếu tải ECO, bạn xem được số dư real-time như MomoPay/ZaloPay.""",
 
-    "vietqr": """VietQR Global là mã thanh toán quốc tế của NAPAS - hệ thống thanh toán quốc gia Việt Nam.
+    "vietqr": """VietQR là mã thanh toán tiêu chuẩn thu tiền nội địa của NAPAS mà mình hay thấy. Còn mã bên em là VietQR Global: dùng để nhận tiền từ khách quốc tế, tức là tiêu chuẩn thu tiền quốc tế của NAPAS.
 
-📱 VietQR (thường): nhận tiền từ khách Việt Nam
-🌏 VietQR Global (của Finviet): nhận tiền từ khách Trung/Hàn/Nhật
-
-✅ Cùng hệ thống NAPAS - an toàn như ngân hàng
-✅ Tiền về tài khoản tự động
-
-Bạn đăng ký để nhận VietQR Global nhé! 😊""",
+Người nước ngoài quét mã thanh toán, tiền đi qua hệ thống Ngân hàng Nhà nước Việt Nam, sẽ tự động chuyển vào tài khoản ngân hàng của anh/chị.""",
 
     "eco": """ECO là ứng dụng quản lý giao dịch của Finviet, giúp bạn:
 
@@ -474,15 +466,17 @@ Bạn đăng ký để đội ngũ hỗ trợ nhé! 🫧""",
     # ═══════════════════════════════════════════
     # 七、风险 / 安全 / 合法
     # ═══════════════════════════════════════════
-    "lừa đảo": """Finviet hoàn toàn hợp pháp! Đây là công ty thanh toán được Ngân hàng Nhà nước Việt Nam cấp phép. ✅
+    "lừa đảo": """【是否合法？】
+越南国家银行发的牌照，正规业务
 
-🏦 Tiền đi qua hệ thống NAPAS - cùng hệ thống ngân hàng quốc gia
-📝 Hợp đồng 3 bên rõ ràng, bảo vệ quyền lợi cửa hàng
-🔒 Khách thanh toán qua app chính thức (WeChat/Alipay/KakaoPay)
+Có hợp pháp không？
+Được Ngân hàng Nhà nước Việt Nam cấp phép, nghiệp vụ chính quy
 
-Nhiều cửa hàng ở TP.HCM và Hải Phòng đã dùng, hoàn toàn yên tâm! 😊
+【是否安全？】
+越南国家银行（SBV）体系结算，VietQR 执行标准，钱是走银行体系，不在我们手里，最终是结算到你自己的银行账户
 
-Bạn cần xem thêm thông tin gì không? 🫧""",
+Có an toàn không？
+Thanh toán qua hệ thống Ngân hàng Nhà nước Việt Nam（SBV）, tiêu chuẩn VietQR, tiền đi qua hệ thống ngân hàng, không ở trong tay chúng em, cuối cùng chuyển vào tài khoản ngân hàng của anh / chị""",
 
     "tiền không về": """Tiền sẽ không bao giờ mất! Tiền đi qua hệ thống NAPAS - hệ thống thanh toán điện tử quốc gia của Việt Nam, được Ngân hàng Nhà nước bảo đảm. 🏦
 
@@ -501,25 +495,22 @@ Bạn hoàn toàn yên tâm nhé! 😊""",
 
 💡 Điều duy nhất cần lưu ý: hợp đồng có điều khoản bồi thường nếu cửa hàng giao hàng không đúng, lừa đảo khách - điều này bảo vệ khách hàng chân chính như bạn! 😊""",
 
-    "điều khoản": """Hợp đồng 3 bên của Finviet có các điều khoản quan trọng:
+    "điều khoản": """【商家如果不诚信经营，比如交货货不对版，或者已经收款不履行合同/不提供服务/销售假冒产品等，客户会通过支付平台（比如支付宝，微信支付，云闪付等平台）申述，并已经提供充足的证据，届时我们会递交给越南当地的法院联合银行来跟商家交涉。】
 
-✅ Quyền lợi của cửa hàng được bảo vệ rõ ràng
-✅ Phí giao dịch minh bạch (1.5%)
-✅ Tiền thanh toán qua NAPAS - an toàn
-
-⚠️ Điều khoản vi phạm: Nếu cửa hàng giao hàng không đúng cam kết, lừa đảo khách, bán hàng giả... thì sẽ bị xử lý theo quy định (qua cổng thanh toán + pháp luật Việt Nam). Điều này bảo vệ bạn khỏi bị lừa bởi khách xấu! 😊
-
-Đội ngũ KINDLITE sẽ giải thích chi tiết từng điều khoản khi ký hợp đồng nhé! 🫧""",
+Thương nhân nếu kinh doanh không đúng như cam kết, giao hàng không đúng, đã nhận tiền nhưng không cung cấp dịch vụ, bán hàng giả... thì khách sẽ khiếu nại qua cổng thanh toán (Alipay, WeChat Pay, UnionPay...) và có đủ bằng chứng, lúc đó sẽ xử lý theo quy định, kết hợp Tòa án địa phương Việt Nam.""",
 
     # ═══════════════════════════════════════════
     # 八、其他问题
     # ═══════════════════════════════════════════
-    "thanh toán khi nào": """Thanh toán hoa hồng/phí giao dịch được tính theo chu kỳ cố định mỗi tháng. Tiền giao dịch về tài khoản ngân hàng ngay khi khách thanh toán. 🏦
+    "thanh toán khi nào": """【多久到账？】
+用 ECO 的话，及时到账；
+本地 VietQR，当天 23:00 之前收款，T+1，即第二天到账；
+用跨境 VietQR Global，当天 23:00 之前收款，T+2，即第三天到账。
 
-📱 Nếu tải ECO: xem được số dư real-time
-📋 Cuối tháng: đối soát và thanh toán phí theo quy định
-
-Bạn đăng ký để nhận thông tin chi tiết về chu kỳ thanh toán nhé! 😊""",
+Bao lâu nhận tiền？
+Dùng ECO thì nhận tiền ngay；
+VietQR nội địa, thu tiền trước 23:00 cùng ngày, T+1, tức ngày hôm sau；
+VietQR Global quốc tế, thu tiền trước 23:00 cùng ngày, T+2, tức ngày thứ ba.""",
 
     "không có khách": """Nếu cửa hàng bạn chưa có nhiều khách Trung/Hàn/Nhật, cứ đăng ký trước đi! 💡
 
