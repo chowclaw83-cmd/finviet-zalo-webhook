@@ -1,6 +1,14 @@
 """
-Finviet Zalo OA Webhook - Vercel Serverless
-泡泡自动回复机器人
+Finviet Zalo OA Webhook - Vercel Serverless v2.0
+泡泡 (Bong Bong) 自动回复机器人
+
+新功能：
+- Supabase 状态持久化（用户状态、对话历史）
+- 线索入库（姓名+城市+电话 自动写入 Supabase，并更新 Zalo 备注）
+- 未命中关键词记录（后台可查看并一键转成 FAQ）
+- 消息日志完整记录
+- 商家/业务员分流（默认商家；业务员报备姓名+电话后解锁专属FAQ）
+- Zalo 备注 API：收到电话/Zalo号后自动回写用户备注
 """
 import os
 import json
@@ -18,18 +26,27 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
+# Supabase
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── 配置 ──────────────────────────────────────────
-VERIFY_TOKEN  = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
-APP_ID        = os.environ.get('ZALO_APP_ID', '')
-ACCESS_TOKEN  = os.environ.get('ZALO_ACCESS_TOKEN', '')
-OA_SECRET    = os.environ.get('ZALO_OA_SECRET', '')  # OA Secret Key（用于 MAC 签名验证）
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # OpenAI API Key
+VERIFY_TOKEN   = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
+APP_ID         = os.environ.get('ZALO_APP_ID', '')
+ACCESS_TOKEN   = os.environ.get('ZALO_ACCESS_TOKEN', '')
+OA_SECRET      = os.environ.get('ZALO_OA_SECRET', '')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+SUPABASE_URL   = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY   = os.environ.get('SUPABASE_KEY', '')
 
-# OpenAI 客户端（使用 GPTsAPI 兼容接口）
+# OpenAI 客户端
 if OPENAI_API_KEY and OPENAI_AVAILABLE:
     openai_client = OpenAI(
         api_key=OPENAI_API_KEY,
@@ -38,141 +55,175 @@ if OPENAI_API_KEY and OPENAI_AVAILABLE:
 else:
     openai_client = None
 
+# Supabase 客户端
+_supabase: "Client | None" = None
+
+def get_supabase():
+    global _supabase
+    if _supabase is None and SUPABASE_AVAILABLE and SUPABASE_URL and SUPABASE_KEY:
+        try:
+            _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            log.error(f"Supabase init error: {e}")
+    return _supabase
+
+# ════════════════════════════════════════════════════════════
+# Supabase 持久化辅助函数
+# 表结构见：/docs/supabase_schema.sql（本文件末尾附）
+# ════════════════════════════════════════════════════════════
+
+def db_get_user_state(user_id: str) -> dict:
+    """获取用户状态，返回 dict 或空 dict"""
+    sb = get_supabase()
+    if not sb:
+        return {}
+    try:
+        res = sb.table('zalo_user_states').select('*').eq('user_id', user_id).single().execute()
+        return res.data or {}
+    except Exception:
+        return {}
+
+
+def db_upsert_user_state(user_id: str, updates: dict):
+    """更新或创建用户状态"""
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        row = {'user_id': user_id, 'updated_at': datetime.utcnow().isoformat(), **updates}
+        sb.table('zalo_user_states').upsert(row, on_conflict='user_id').execute()
+    except Exception as e:
+        log.error(f"db_upsert_user_state error: {e}")
+
+
+def db_log_message(user_id: str, direction: str, text: str,
+                   matched_faq: str = None, matched_type: str = None,
+                   user_type: str = 'merchant'):
+    """记录消息日志（direction: in/out）"""
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        sb.table('zalo_message_logs').insert({
+            'user_id': user_id,
+            'direction': direction,
+            'text': text[:1000],
+            'matched_faq': matched_faq,
+            'matched_type': matched_type,
+            'user_type': user_type,
+            'created_at': datetime.utcnow().isoformat(),
+        }).execute()
+    except Exception as e:
+        log.error(f"db_log_message error: {e}")
+
+
+def db_log_unmatched(user_id: str, text: str, user_type: str = 'merchant'):
+    """记录未命中关键词（后台可查看并转为FAQ）"""
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        sb.table('zalo_unmatched_queries').insert({
+            'user_id': user_id,
+            'text': text[:500],
+            'user_type': user_type,
+            'status': 'pending',      # pending / converted / ignored
+            'created_at': datetime.utcnow().isoformat(),
+        }).execute()
+    except Exception as e:
+        log.error(f"db_log_unmatched error: {e}")
+
+
+def db_save_lead(user_id: str, name: str, city: str, phone: str, user_type: str = 'merchant'):
+    """保存线索（商家留资 / 业务员报备）"""
+    sb = get_supabase()
+    if not sb:
+        return
+    try:
+        sb.table('zalo_leads').upsert({
+            'user_id': user_id,
+            'name': name,
+            'city': city,
+            'phone': phone,
+            'user_type': user_type,
+            'status': 'new',
+            'updated_at': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat(),
+        }, on_conflict='user_id').execute()
+    except Exception as e:
+        log.error(f"db_save_lead error: {e}")
+
+
+def db_get_faq_extra() -> dict:
+    """从 Supabase 读取后台新增的 FAQ 条目 {keyword: answer}"""
+    sb = get_supabase()
+    if not sb:
+        return {}
+    try:
+        res = sb.table('zalo_faq_extra').select('keyword,answer').eq('active', True).execute()
+        return {row['keyword'].lower(): row['answer'] for row in (res.data or [])}
+    except Exception as e:
+        log.error(f"db_get_faq_extra error: {e}")
+        return {}
+
+
+# ════════════════════════════════════════════════════════════
+# Zalo API：更新用户备注
+# ════════════════════════════════════════════════════════════
+
+def update_zalo_tag(user_id: str, tag_name: str):
+    """给 Zalo 用户打标签（tag）"""
+    if not ACCESS_TOKEN:
+        return
+    url = "https://openapi.zalo.me/v2.0/oa/tag/tagfollower"
+    headers = {'access_token': ACCESS_TOKEN, 'Content-Type': 'application/json'}
+    try:
+        r = requests.post(url, headers=headers,
+                          json={"follower_id": user_id, "tag_name": tag_name},
+                          timeout=10)
+        log.info(f"tag user {user_id} as '{tag_name}': {r.status_code}")
+    except Exception as e:
+        log.error(f"update_zalo_tag error: {e}")
+
+
+def update_zalo_note(user_id: str, note: str):
+    """更新 Zalo OA 关注者备注（显示在 OA 后台粉丝列表）"""
+    if not ACCESS_TOKEN:
+        return
+    url = "https://openapi.zalo.me/v2.0/oa/follower"
+    headers = {'access_token': ACCESS_TOKEN, 'Content-Type': 'application/json'}
+    try:
+        r = requests.post(url, headers=headers,
+                          json={"follower_id": user_id, "name": note},
+                          timeout=10)
+        log.info(f"update note for {user_id}: {r.status_code} {r.text[:100]}")
+    except Exception as e:
+        log.error(f"update_zalo_note error: {e}")
+
+
+# ════════════════════════════════════════════════════════════
+# 签名验证
+# ════════════════════════════════════════════════════════════
 
 def verify_zalo_mac(data: dict, timestamp: str, signature: str) -> bool:
-    """验证 Zalo webhook MAC 签名
-    
-    Zalo 公式: raw = app_id + JSON.stringify(body) + timestamp + oa_secret
-    其中 body 不包含 signature 字段本身
-    """
     if not OA_SECRET or not signature:
-        log.warning("No OA_SECRET or signature, skip MAC verification")
-        return True  # 跳过验证以便调试
-    
-    # JSON 序列化时排除 signature 字段（如果存在）
+        return True
     body_for_sign = {k: v for k, v in data.items() if k != 'signature'}
     body_json = json.dumps(body_for_sign, separators=(',', ':'))
-    
-    # 按正确顺序拼接：app_id + body_json + timestamp + oa_secret
     raw = str(APP_ID) + body_json + timestamp + OA_SECRET
     expected = hashlib.sha256(raw.encode('utf-8')).hexdigest()
-    
     ok = hmac.compare_digest(expected, signature)
     if not ok:
-        log.warning(f"MAC mismatch:\n  raw={raw[:100]}\n  expected={expected}\n  got={signature}")
+        log.warning(f"MAC mismatch: expected={expected}, got={signature}")
     return ok
 
-# ═══════════════════════════════════════════════════════════════════════
-# 中文关键词 → FAQ_KB key 映射（解决中文问法匹配问题）
-# 用法：用户发中文 → 先转成越南语关键词 → 再走 FAQ 匹配
-# ═══════════════════════════════════════════════════════════════════════
-ZH2FAQ = {
-    # 公司/Finviet 相关
-    "公司": "finviet",
-    "finviet": "finviet",
-    "你们": "finviet",
-    "是什么公司": "finviet",
-    "公司介绍": "finviet",
-    # 牌照/合法
-    "牌照": "giấy phép",
-    "牌照吗": "giấy phép",
-    "合法": "giấy phép",
-    "合法吗": "giấy phép",
-    "有牌照": "giấy phép",
-    "正规": "giấy phép",
-    "正规吗": "giấy phép",
-    "执照": "giấy phép",
-    "持牌": "giấy phép",
-    # 安全
-    "安全": "an toàn",
-    "安全吗": "an toàn",
-    "靠谱": "an toàn",
-    # 押金/费用
-    "押金": "đặt cọc",
-    "要押金": "đặt cọc",
-    "保证金": "đặt cọc",
-    "交钱": "đặt cọc",
-    "手续费": "phí",
-    "收多少": "phí",
-    "收我钱": "phí",
-    "费用": "phí",
-    "收费": "phí",
-    "佣金": "thu nhập",
-    "我能赚": "thu nhập",
-    "收入": "thu nhập",
-    "赚多少": "thu nhập",
-    "利润": "thu nhập",
-    # 签约/资料
-    "签约": "ký hợp đồng",
-    "签合同": "hợp đồng",
-    "合同": "hợp đồng",
-    "资料": "giấy tờ",
-    "证件": "giấy tờ",
-    "身份证": "giấy tờ",
-    "执照": "giấy tờ",
-    "需要什么": "cần gì",
-    "准备什么": "cần gì",
-    "什么材料": "cần gì",
-    "多久": "bao lâu",
-    "几天": "bao lâu",
-    "几天能用": "bao lâu",
-    "多久能好": "bao lâu",
-    "多久开通": "bao lâu",
-    "多久能用": "bao lâu",
-    # 兼职/全职
-    "兼职": "bán thời gian",
-    "全职": "toàn thời gian",
-    "parttime": "bán thời gian",
-    "fulltime": "toàn thời gian",
-    "只做": "bán thời gian",
-    "可以吗": "bán thời gian",
-    "能做吗": "bán thời gian",
-    # 收钱/到账
-    "到账": "tiền về",
-    "钱到": "tiền về",
-    "到账吗": "tiền về",
-    "多久到": "tiền về",
-    "到账时间": "tiền về",
-    "收款": "tiền về",
-    "收钱": "tiền về",
-    "钱怎么到": "tiền về",
-    "bank": "ngân hàng",
-    "银行卡": "ngân hàng",
-    "账户": "ngân hàng",
-    # 游客/中日韩
-    "中国游客": "khách trung quốc",
-    "微信": "wechat",
-    "支付宝": "alipay",
-    "韩国游客": "kakao",
-    "kakao": "kakao",
-    "扫码": "quét mã",
-    "怎么用": "sử dụng",
-    "使用": "sử dụng",
-    "怎么操作": "sử dụng",
-    # momo/zalopay
-    "momo": "momo",
-    "zalopay": "zalopay",
-    "有momo": "momo",
-    "已有": "momo",
-    # 骗/风险
-    "骗": "lừa đảo",
-    "骗人": "lừa đảo",
-    "靠谱吗": "lừa đảo",
-    "真的": "lừa đảo",
-    "真的假的": "lừa đảo",
-    "风险": "lừa đảo",
-    "安全吗": "an toàn",
-}
 
-
-# ── 培训手册 FAQ 数据库（透彻版）──────────────────
-# 原则：覆盖所有自然语言变体 + 越南语/中文/英文三语
-# 注意：答案内容 100% 保持不变，只改匹配逻辑
+# ════════════════════════════════════════════════════════════
+# FAQ 数据库（商家版）
+# ════════════════════════════════════════════════════════════
 
 FAQ_KB = {
-    # ═══════════════════════════════════════════
     # 一、关于 Finviet / 公司资质
-    # ═══════════════════════════════════════════
     "finviet": """Finviet là công ty thanh toán được Ngân hàng Nhà nước Việt Nam (SBV) cấp phép hoạt động thanh toán. Giấy phép số: ĐVCNTT-001.
 
 ✅ 100% hợp pháp
@@ -181,7 +232,7 @@ FAQ_KB = {
 
 Bạn cần xem giấy phép không? 😊""",
 
-    "công ty": """Finviet là công ty thanh toán được cấp phép bởi Ngân hàng Nhà nước Việt Nam. 
+    "công ty": """Finviet là công ty thanh toán được cấp phép bởi Ngân hàng Nhà nước Việt Nam.
 
 ✅ Kinh doanh hợp pháp 100%
 ✅ Hợp tác với NAPAS - hệ thống thanh toán quốc gia
@@ -210,9 +261,7 @@ Cần xem thêm thông tin không? 🫧""",
 
 Bạn hoàn toàn yên tâm nhé! 😊""",
 
-    # ═══════════════════════════════════════════
     # 二、收中日韩游客的钱
-    # ═══════════════════════════════════════════
     "khách trung quốc": """Bên em đang giúp anh/chị giải quyết một vấn đề rất thực tế: khách Trung Quốc, Hàn Quốc, Nhật Bản họ quen thanh toán không tiền mặt bằng Alipay, WeChat, Kakao nên điện thoại lúc nào cũng có mấy hình thức này.
 
 Nếu cửa hàng mình nhận được mấy hình thức này, khách có thể quét mã và thanh toán ngay tại quán mình.
@@ -224,7 +273,7 @@ Mình cứ dùng thử trước, có khách là có thêm doanh thu, còn nếu 
     "thanh toán quốc tế": """Finviet giúp bạn nhận tiền từ khách du lịch Trung Quốc, Hàn Quốc, Nhật Bản một cách dễ dàng và hợp pháp.
 
 🌏 WeChat Pay - 微信支付 (Trung Quốc)
-🌏 Alipay - 支付宝 (Trung Quốc)  
+🌏 Alipay - 支付宝 (Trung Quốc)
 🌏 KakaoPay (Hàn Quốc)
 🌏 Thẻ quốc tế Visa/Mastercard
 
@@ -253,9 +302,7 @@ Bạn đăng ký đi, rất đơn giản! 🫧""",
 
 Đăng ký ngay hôm nay! 😊""",
 
-    # ═══════════════════════════════════════════
     # 三、钱怎么到账 / NAPAS / 银行
-    # ═══════════════════════════════════════════
     "tiền về": """【多久到账？】
 用 ECO 的话，及时到账；
 本地 VietQR，当天 23:00 之前收款，T+1，即第二天到账；
@@ -301,9 +348,7 @@ Sau khi ký hợp đồng, đội ngũ Finviet sẽ hướng dẫn bạn tải v
 
 Cần kiểm tra giao dịch cụ thể, liên hệ đội ngũ hỗ trợ nhé! 🫧""",
 
-    # ═══════════════════════════════════════════
     # 四、费用 / 押金 / 手续费
-    # ═══════════════════════════════════════════
     "đặt cọc": """Không cần đặt cọc! Bạn đăng ký hoàn toàn miễn phí. ✅
 
 💰 Phí giao dịch chỉ 1.5% - tính luôn vào thanh toán, bạn không phải trả thêm gì cả
@@ -334,9 +379,7 @@ Cứ yên tâm đăng ký dùng thử nhé! 😊""",
 
 Cửa hàng nào có nhiều khách Trung/Hàn/Nhật thì thu nhập càng cao! 🫧""",
 
-    # ═══════════════════════════════════════════
     # 五、签约流程 / 资料
-    # ═══════════════════════════════════════════
     "hợp đồng": """Hợp đồng là hợp đồng 3 bên giữa: Finviet + Cửa hàng của bạn + Ngân hàng/NAPAS.
 
 📝 Các thông tin cần chuẩn bị:
@@ -412,9 +455,7 @@ Bạn hoàn toàn yên tâm nhé! 😊""",
 
 Liên hệ đội ngũ KINDLITE để được hỗ trợ thủ tục nhé! 🫧""",
 
-    # ═══════════════════════════════════════════
     # 六、收款方式 / ZaloPay / MoMo 对比
-    # ═══════════════════════════════════════════
     "momo": """MomoPay và ZaloPay rất tiện lợi nhưng chỉ nhận được tiền từ khách Việt Nam thôi! 🇻🇳
 
 🌏 Finviet giúp bạn NHẬN THÊM tiền từ khách:
@@ -463,9 +504,7 @@ Bạn đăng ký thêm Finviet để tăng thu nhập nhé! 😊""",
 
 Bạn đăng ký để đội ngũ hỗ trợ nhé! 🫧""",
 
-    # ═══════════════════════════════════════════
     # 七、风险 / 安全 / 合法
-    # ═══════════════════════════════════════════
     "lừa đảo": """【是否合法？】
 越南国家银行发的牌照，正规业务
 
@@ -490,7 +529,7 @@ Bạn hoàn toàn yên tâm nhé! 😊""",
 
 📋 Bảo vệ 3 lớp:
 1️⃣ NAPAS (Ngân hàng Nhà nước) - tiền đi qua hệ thống ngân hàng
-2️⃣ Hợp đồng 3 bên - quyền lợi rõ ràng  
+2️⃣ Hợp đồng 3 bên - quyền lợi rõ ràng
 3️⃣ Cổng thanh toán quốc tế (WeChat/Alipay) - có cơ chế khiếu nại
 
 💡 Điều duy nhất cần lưu ý: hợp đồng có điều khoản bồi thường nếu cửa hàng giao hàng không đúng, lừa đảo khách - điều này bảo vệ khách hàng chân chính như bạn! 😊""",
@@ -499,9 +538,7 @@ Bạn hoàn toàn yên tâm nhé! 😊""",
 
 Thương nhân nếu kinh doanh không đúng như cam kết, giao hàng không đúng, đã nhận tiền nhưng không cung cấp dịch vụ, bán hàng giả... thì khách sẽ khiếu nại qua cổng thanh toán (Alipay, WeChat Pay, UnionPay...) và có đủ bằng chứng, lúc đó sẽ xử lý theo quy định, kết hợp Tòa án địa phương Việt Nam.""",
 
-    # ═══════════════════════════════════════════
     # 八、其他问题
-    # ═══════════════════════════════════════════
     "thanh toán khi nào": """【多久到账？】
 用 ECO 的话，及时到账；
 本地 VietQR，当天 23:00 之前收款，T+1，即第二天到账；
@@ -550,102 +587,387 @@ Bạn gửi thông tin đăng ký luôn đi! Nhập 4️⃣ 🫧""",
 ❌ Không cần có nhiều khách quốc tế sẵn
 
 Đăng ký thôi! Nhập 4️⃣ để bắt đầu 😊""",
+
+    # 九、兼职/全职（补全缺失答案）
+    "bán thời gian": """Làm bán thời gian (part-time) hoàn toàn được! ✅
+
+📌 Nhân viên bán thời gian / đại lý tự do:
+• Tự sắp xếp lịch làm việc
+• Không cần điểm danh, không cần lên văn phòng
+• Thu nhập = phí mở điểm mỗi cửa hàng thành công ký hợp đồng
+
+💡 Phù hợp với bạn đang có việc làm khác và muốn có thêm thu nhập!
+
+Bạn muốn biết thêm về mức thu nhập không? Nhập 2️⃣ 😊""",
+
+    "toàn thời gian": """Làm toàn thời gian (full-time) có thu nhập ổn định hơn! 💼
+
+📌 Nhân viên toàn thời gian:
+• Lương cơ bản hàng tháng
+• Hoa hồng KPI theo kết quả
+• Được đào tạo bài bản và hỗ trợ từ đội ngũ
+
+✅ Cơ hội thăng tiến lên A-level agent (đại lý cấp A)
+✅ Làm việc tại Hải Phòng hoặc TP.HCM
+
+Bạn muốn tìm hiểu thêm? Nhập 4️⃣ để đăng ký 🫧""",
 }
 
 
-def faq_lookup(text: str) -> str | None:
-    """在 FAQ 数据库中查找匹配的回答（三语支持）
+# ════════════════════════════════════════════════════════════
+# 业务员专属 FAQ（报备后解锁）
+# ════════════════════════════════════════════════════════════
 
-    匹配策略（按优先级）：
-    1. 越南语关键词包含匹配（keyword in text）
-    2. 中文关键词 → 映射越南语 key → 匹配
-    3. 越南语 key 包含用户消息中的词（text in keyword）
+SALESMAN_FAQ_KB = {
+    "hoa hồng": """【业务员专属 - 佣金说明】
+
+📌 兼职/自由代理：
+• 每成功签约1家商户 → 领取开点佣金（具体金额培训时确认）
+• 无底薪，纯佣金制
+
+📌 全职员工：
+• 底薪 + KPI 佣金
+• 每月目标：XX家商户（入职培训时确认）
+
+⚠️ 佣金结构属于内部数据，请勿对外透露
+有问题请直接联系你的上级或城市管理员 😊""",
+
+    "kpi": """【业务员专属 - KPI 指标】
+
+📊 核心KPI：
+• 月度新增有效商户数
+• 商户活跃率（开通后30天内有交易）
+• 覆盖街区数量
+
+📋 有效商户定义：
+• 成功签约 + 系统开通 + 30天内产生交易
+
+详细指标请参考培训手册或联系城市管理员 😊""",
+
+    "quy trình": """【业务员专属 - 展业流程】
+
+📋 标准展业步骤：
+1️⃣ 在CRM系统报备目标商户（防止抢单）
+2️⃣ 拜访商户 → 介绍Finviet服务
+3️⃣ 商户有意向 → 预约签约时间
+4️⃣ 协助准备资料（营业执照、身份证、银行账户）
+5️⃣ 陪同或独立完成签约
+6️⃣ 协助安装ECO、测试收款
+7️⃣ 在CRM系统标记为"已开户"
+
+⚠️ 注意：必须先在系统报备，否则可能被其他业务员抢占
+有问题请联系你的城市管理员 😊""",
+
+    "hệ thống": """【业务员专属 - 后台系统】
+
+🖥️ CRM系统（防撞报备系统）：
+• 地址：你的城市管理员会给你开通账号
+• 功能：报备商户、查看街区、标记开户状态
+
+📱 使用指南：
+• 先登录CRM系统，输入商户名称和地址报备
+• 报备成功后进入"保护期"，其他业务员无法抢占
+• 保护期内完成签约，标记为"已开户"
+
+遇到系统问题请联系城市管理员 😊""",
+
+    "báo cáo": """【业务员专属 - 如何报备】
+
+📋 报备方式：
+• 登录CRM系统 → 新建报备 → 填写商户信息
+
+📍 报备必填：
+• 商户名称
+• 详细地址
+• 联系电话（如有）
+
+⚠️ 报备即进入保护期，请确认你有能力在保护期内完成签约
+保护期结束前未签约会自动释放到公共池
+
+有问题请联系城市管理员 😊""",
+
+    "đào tạo": """【业务员专属 - 培训资料】
+
+📚 培训手册：
+• 你的城市管理员应已向你发送PDF培训手册
+• 包含：产品介绍、话术、常见问题、操作流程
+
+📋 上岗前必读：
+1. 产品介绍（第1-2章）
+2. 展业话术（第3章）
+3. 签约流程（第4章）
+4. CRM系统操作（第5章）
+
+如果没有收到培训手册，请联系你的城市管理员 😊""",
+}
+
+SALESMAN_FAQ_KEYWORDS = {
+    "hoa hồng": [
+        "hoa hồng của tôi", "tiền hoa hồng bao nhiêu", "commission",
+        "tôi nhận được bao nhiêu", "佣金多少", "我能赚多少", "开点费",
+        "收入bao nhiêu", "phần trăm của tôi",
+    ],
+    "kpi": [
+        "kpi", "chỉ tiêu", "target", "目标", "指标", "考核",
+        "mỗi tháng phải", "chỉ tiêu tháng",
+    ],
+    "quy trình": [
+        "quy trình", "làm như thế nào", "bắt đầu từ đâu", "các bước",
+        "展业流程", "怎么做", "步骤", "流程",
+        "quy trình làm việc", "quy trình ký",
+    ],
+    "hệ thống": [
+        "hệ thống", "crm", "phần mềm", "app nội bộ",
+        "系统", "后台", "crm系统", "怎么用系统",
+        "đăng nhập vào đâu", "link hệ thống",
+    ],
+    "báo cáo": [
+        "báo cáo", "report", "báo cáo cửa hàng", "báo cáo merchant",
+        "报备", "报备系统", "怎么报备", "先报备",
+        "đăng ký cửa hàng", "ghi tên cửa hàng",
+    ],
+    "đào tạo": [
+        "đào tạo", "training", "tài liệu", "hướng dẫn",
+        "培训", "培训材料", "手册", "操作手册",
+        "tôi mới vào", "mới tham gia", "mới làm",
+    ],
+}
+
+
+# ════════════════════════════════════════════════════════════
+# 关键词扩展层 → FAQ_KB 答案映射
+# ════════════════════════════════════════════════════════════
+
+FAQ_KEYWORDS = {
+    "finviet là gì": [
+        "finviet là gì", "finviet la gi", "finviet", "finviet vietnam",
+        "công ty finviet", "công ty của bạn", "công ty là gì",
+        "你们是什么公司", "finviet是什么", "giới thiệu công ty",
+        "công ty", "công ty của", "bạn là công ty nào",
+        "what is finviet", "finviet company",
+    ],
+    "giấy phép": [
+        "giấy phép", "có giấy phép", "có phép không", "được cấp phép",
+        "chứng chỉ", "牌照", "有牌照吗", "合法吗", "正规吗",
+        "có hợp pháp không", "legal", "licensed", "authorized",
+        "giấy phép kinh doanh", "giấy phép thanh toán",
+        "finviet có giấy phép", "finviet hợp pháp",
+    ],
+    "khách trung quốc": [
+        "khách trung quốc", "khách trung", "游客", "中国游客", "中国客人",
+        "khách tàu", "trung quốc", "tiền trung quốc",
+        "khách du lịch trung", "du lịch trung",
+        "khách trung quốc đến việt nam", "người trung quốc",
+    ],
+    "wechat": [
+        "wechat", "wechat pay", "微信", "微信支付", "微信付",
+        "dùng wechat", "quét wechat", "wetchat", "we chat", "ví wechat",
+    ],
+    "alipay": [
+        "alipay", "支付宝", "alipay thanh toán", "dùng alipay",
+        "ali pay", "ví alipay", "alipa",
+    ],
+    "kakao": [
+        "kakao", "kakaopay", "韩国", "khách hàn", "khách hàn quốc",
+        "kakao pay", "hàn quốc", "thanh toán hàn quốc",
+    ],
+    "thanh toán quốc tế": [
+        "thanh toán quốc tế", "quốc tế", "thanh toán nước ngoài",
+        "international payment", "外国游客", "国际支付",
+        "khách nước ngoài", "người nước ngoài",
+    ],
+    "tiền về": [
+        "tiền về", "tiền về tài khoản", "tiền có về không",
+        "nhận tiền", "tiền đi đâu", "钱到账", "收款", "到账",
+        "nhận tiền như thế nào", "làm sao nhận tiền",
+    ],
+    "ngân hàng": [
+        "ngân hàng", "tài khoản", "bank", "về ngân hàng", "银行卡",
+        "tài khoản ngân hàng", "số tài khoản", "银行账户", "账户", "账号",
+    ],
+    "napas": ["napas", "hệ thống napas", "napas là gì", "银行清算"],
+    "vietqr": [
+        "vietqr", "vietqr global", "mã qr", "quét mã", "二维码",
+        "qr code", "qr", "scan qr", "扫码", "扫二维码",
+    ],
+    "eco": ["eco", "ví eco", "eco wallet", "app eco", "eco app", "eco系统"],
+    "bao lâu": [
+        "bao lâu", "mất bao lâu", "lâu không", "几天", "khi nào",
+        "什么时候", "多久", "how long", "how soon",
+    ],
+    "đặt cọc": [
+        "đặt cọc", "không đặt cọc", "押金", "要押金吗", "保证金",
+        "có phải đặt cọc không", "đặt cọc bao nhiêu",
+    ],
+    "phí": [
+        "phí", "phí giao dịch", "phí thanh toán", "手续费", "收多少",
+        "费率", "费用", "有phí không", "1.5%", "bao nhiêu phí",
+    ],
+    "thu nhập": [
+        "thu nhập", "lương", "làm kiếm được bao nhiêu",
+        "收入", "佣金", "赚多少", "hoa hồng", "commission",
+    ],
+    "ký hợp đồng": [
+        "ký hợp đồng", "ký hợp đồng 3 bên", "签合同", "签约",
+        "hợp đồng", "sign contract", "ký",
+    ],
+    "đăng ký": [
+        "đăng ký", "muốn đăng ký", "dang ky", "报名", "注册",
+        "muốn tham gia", "tham gia", "register", "sign up", "apply",
+    ],
+    "giấy tờ": [
+        "giấy tờ", "cần giấy tờ gì", "cần những gì",
+        "资料", "要什么资料", "证件", "身份证", "营业执照",
+        "cmnd", "cccd", "hộ chiếu", "passport", "giấy phép kinh doanh",
+    ],
+    "không biết chữ": ["không biết chữ", "不识字", "không biết đọc"],
+    "ủy quyền": ["ủy quyền", "giấy ủy quyền", "授权", "委托书"],
+    "thay đổi": ["thay đổi", "đổi", "cập nhật", "变更", "更换", "更改"],
+    "momo": ["momo", "momo pay", "momoPay", "ví momo"],
+    "zalopay": ["zalopay", "zalo pay", "ví zalo"],
+    "quét mã": ["quét mã", "quét qr", "扫码", "scan"],
+    "sử dụng": ["sử dụng", "dùng", "cách dùng", "怎么用", "如何使用", "how to use"],
+    "lừa đảo": [
+        "lừa đảo", "lừa", "骗人", "骗", "scam", "fake", "假的",
+        "finviet có lừa đảo không",
+    ],
+    "tiền không về": [
+        "tiền không về", "mất tiền", "钱不到账", "钱会不见吗",
+        "tiền bị mất", "lo mất tiền",
+    ],
+    "rủi ro": ["rủi ro", "risk", "风险", "有什么风险"],
+    "điều khoản": ["điều khoản", "条款", "合同条款", "terms"],
+    "không có khách": [
+        "không có khách", "chưa có khách", "没客人", "没有游客", "客人少",
+    ],
+    "cần gì": [
+        "cần gì", "cần những gì", "phải làm gì",
+        "需要什么", "要准备什么", "what do i need",
+    ],
+    "bán thời gian": [
+        "bán thời gian", "part time", "parttime", "兼职",
+        "chỉ làm ngoài giờ", "làm thêm", "làm buổi tối",
+        "không làm toàn thời gian",
+    ],
+    "toàn thời gian": [
+        "toàn thời gian", "full time", "fulltime", "全职",
+        "làm chính thức", "nhân viên chính thức",
+    ],
+}
+
+
+def faq_lookup(text: str, user_type: str = 'merchant') -> tuple:
+    """查找 FAQ，返回 (answer, faq_key, match_type)
+    user_type: 'merchant' | 'salesman'
     """
     text_lower = text.lower().strip()
 
-    # ── Step 1: 越南语关键词直接匹配 ───────────────
-    for keyword, answer in FAQ_KB.items():
-        if keyword in text_lower:
-            log.info(f"FAQ hit [VN]: '{keyword}' in '{text_lower[:50]}'")
-            return answer
+    # 业务员专属：先查业务员 FAQ
+    if user_type == 'salesman':
+        for faq_key, keywords in SALESMAN_FAQ_KEYWORDS.items():
+            for kw in keywords:
+                if kw in text_lower:
+                    ans = SALESMAN_FAQ_KB.get(faq_key)
+                    if ans:
+                        return ans, faq_key, 'salesman_faq'
+        # 业务员也可以查商家FAQ（通用知识）
 
-    # ── Step 2: 中文关键词 → 映射越南语 key ─────────
-    for zh_key, faq_key in ZH2FAQ.items():
-        if zh_key in text_lower:
-            if faq_key in FAQ_KB:
-                log.info(f"FAQ hit [ZH→VN]: '{zh_key}' → '{faq_key}'")
-                return FAQ_KB[faq_key]
+    # 后台动态 FAQ（Supabase）
+    try:
+        extra_faq = db_get_faq_extra()
+        for kw, ans in extra_faq.items():
+            if kw in text_lower:
+                return ans, kw, 'extra_faq'
+    except Exception:
+        pass
 
-    # ── Step 3: 用户消息 → 越南语 key 包含匹配 ─────
-    # 例：用户说 "我可以做兼职吗"，FAQ 有 key "bán thời gian"
-    # "bán thời gian" 里包含用户词的情况
-    for keyword, answer in FAQ_KB.items():
-        # 检查用户消息里的每个词是否被 FAQ key 包含
-        for word in text_lower.split():
-            if len(word) >= 3 and word in keyword:
-                log.info(f"FAQ hit [reverse]: '{keyword}' contains '{word}'")
-                return answer
+    # 关键词扩展层
+    for faq_key, keywords in FAQ_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text_lower:
+                # faq_key 可能与 FAQ_KB 的 key 不完全一样，需做映射
+                # FAQ_KEYWORDS 的 key 有时是描述性名称，FAQ_KB 的 key 是越南语
+                # 这里直接用 faq_key 查 FAQ_KB，找不到则尝试去掉" là gì"等
+                ans = FAQ_KB.get(faq_key)
+                if ans:
+                    return ans, faq_key, 'keyword_match'
+                # 尝试从 FAQ_KB 中找第一个包含 faq_key 的 key
+                for kb_key in FAQ_KB:
+                    if faq_key.startswith(kb_key) or kb_key in faq_key:
+                        return FAQ_KB[kb_key], kb_key, 'keyword_match'
 
-    return None
+    # 纯 FAQ_KB key 包含匹配（兜底）
+    for faq_key, answer in FAQ_KB.items():
+        if faq_key in text_lower:
+            return answer, faq_key, 'direct_key_match'
+
+    return None, None, None
 
 
-# ── 菜单话术库 ─────────────────────────────────
-SCRIPTS = {
+# ════════════════════════════════════════════════════════════
+# 菜单话术
+# ════════════════════════════════════════════════════════════
+
+# 商家开场白
+SCRIPTS_MERCHANT = {
     'opening': """Chào bạn! 👋
-Mình là Bong Bong - trợ lý tuyển dụng của KINDLITE VIET NAM.
-Cảm ơn bạn đã quan tâm đến cơ hội hợp tác thanh toán di động 🇨🇳💳
+Mình là Bong Bong - trợ lý của KINDLITE VIET NAM.
 
-Bạn muốn tìm hiểu điều gì?
-1️⃣ Công việc cụ thể là gì?
-2️⃣ Thu nhập như thế nào?
-3️⃣ Điều kiện tham gia?
-4️⃣ Tôi muốn đăng ký ngay
+Bạn đang tìm hiểu giải pháp thanh toán quốc tế (WeChat Pay / Alipay / KakaoPay) cho cửa hàng, hay bạn là nhân viên kinh doanh của chúng tôi?
+
+👆 Nếu bạn là CHỦ CỬA HÀNG muốn nhận tiền từ khách Trung/Hàn/Nhật:
+1️⃣ Dịch vụ này là gì?
+2️⃣ Phí và thu nhập như thế nào?
+3️⃣ Cần chuẩn bị gì?
+4️⃣ Đăng ký ngay
+
+👆 Nếu bạn là NHÂN VIÊN KINH DOANH đã được đào tạo:
+→ Nhắn: "Tôi là nhân viên" + họ tên + số điện thoại để đăng nhập chế độ nhân viên
 
 Nhập số hoặc gõ câu hỏi nhé 😊""",
 
-    '1': """Công việc chính: đi thị trường khu vực bạn phụ trách 📍
+    '1': """Dịch vụ KINDLITE giúp cửa hàng bạn nhận tiền từ khách Trung Quốc, Hàn Quốc, Nhật Bản! 🌏
 
-→ Tìm quán ăn, cà phê, cửa hàng có khách Trung Quốc
-→ Giới thiệu kết nối WeChat Pay / Alipay
-→ Hỗ trợ cài đặt và theo dõi sau ký hợp đồng
+→ Khách quét mã QR bằng WeChat Pay / Alipay / KakaoPay
+→ Tiền tự động về tài khoản ngân hàng VNĐ của bạn
+→ 100% hợp pháp, có giấy phép từ Ngân hàng Nhà nước
 
-✅ Tự quản lý lịch làm việc
-✅ Không cần điểm danh, không cần lên văn phòng
-✅ Làm việc tại Hải Phòng hoặc TP.HCM
+✅ Không ảnh hưởng đến cách thu tiền hiện tại của bạn
+✅ Chỉ bổ sung thêm một cách nhận tiền từ khách quốc tế
 
 Bạn muốn hỏi thêm gì không? 😊""",
 
-    '2': """Thu nhập phụ thuộc loại hình hợp tác 💰
+    '2': """Phí và thu nhập: 💰
 
-📌 Nhân viên toàn thời gian:
-   Lương cơ bản + hoa hồng KPI
+💳 Phí giao dịch: chỉ 1.5% mỗi giao dịch thành công
+❌ Không có phí đăng ký, phí bảo trì, hay phí ẩn
 
-📌 Nhân viên bán thời gian / đại lý:
-   Thu nhập = phí mở điểm mỗi cửa hàng thành công
+💡 Ví dụ: Khách Trung Quốc thanh toán 500元 (~1,885,000 VNĐ)
+→ Bạn nhận ~1,857,000 VNĐ (đã trừ 1.5%)
 
-Con số cụ thể sẽ được trao đổi trực tiếp khi bạn gặp đội ngũ của chúng tôi.
+Càng nhiều khách quốc tế → Thu nhập càng cao! 🫧""",
 
-Bạn đang ở thành phố nào? (Hải Phòng / TP.HCM) 🏙️""",
+    '3': """Bạn chỉ cần chuẩn bị: 📋
 
-    '3': """Không yêu cầu bằng cấp hay kinh nghiệm 🙌
+✅ Giấy phép kinh doanh
+✅ CMND / CCCD / Hộ chiếu (người đại diện)
+✅ Số tài khoản ngân hàng
 
-✅ Biết tiếng Việt
-✅ Thích giao tiếp, chịu đi thị trường
-✅ Quen thuộc khu vực Hải Phòng hoặc TP.HCM
-✅ Có xe máy
+❌ Không cần đặt cọc
+❌ Không cần công chứng phức tạp
 
-Ưu tiên: có kinh nghiệm bán hàng, biết tiếng Trung/Anh
+Đăng ký đi, đội ngũ KINDLITE sẽ đến gặp bạn trực tiếp! Nhập 4️⃣ 😊""",
 
-Bạn muốn đăng ký thử không? Nhập 4️⃣ để bắt đầu 😊""",
+    '4': """Tuyệt vời! 🎉 Để đội ngũ KINDLITE liên hệ hỗ trợ, mình cần 3 thông tin:
 
-    '4': """Tuyệt vời! 🎉 Để chúng tôi liên hệ lại với bạn, cần 3 thông tin:
+👤 Họ tên của bạn:
+📍 Thành phố (Hải Phòng / TP.HCM):
+📱 Số điện thoại Zalo:
 
-👤 Họ tên của bạn là gì?
-📍 Bạn đang ở thành phố nào? (Hải Phòng / TP.HCM)
-📱 Số điện thoại Zalo/điện thoại của bạn?
+Gửi cả 3 thông tin một lần nhé, ví dụ:
+「Nguyễn Văn A, TP.HCM, 0901234567」
 
-Bạn có thể gửi cả 3 thông tin một lúc nhé, ví dụ:
-「Nguyễn Văn A, TP.HCM, 0901234567」""",
+Chúng tôi sẽ liên hệ trong vòng 24 giờ! 😊""",
 
     'thanks': """Cảm ơn bạn! ✅
 Đội ngũ KINDLITE sẽ liên hệ với bạn trong vòng 24 giờ.
@@ -656,374 +978,324 @@ Chúc bạn một ngày tốt lành! 🌟""",
     'default': """Xin lỗi, mình chưa hiểu câu hỏi của bạn 😅
 
 Bạn có thể chọn:
-1️⃣ Công việc cụ thể là gì?
-2️⃣ Thu nhập như thế nào?
-3️⃣ Điều kiện tham gia?
-4️⃣ Tôi muốn đăng ký ngay
+1️⃣ Dịch vụ này là gì?
+2️⃣ Phí và thu nhập?
+3️⃣ Cần chuẩn bị gì?
+4️⃣ Đăng ký ngay
 
 Hoặc nhắn bất kỳ câu hỏi nào, mình sẽ cố gắng trả lời! 🫧"""
 }
 
-# ── GPT-4 System Prompt ─────────────────────────────────
-GPT_SYSTEM_PROMPT = """Bạn là Bong Bong - trợ lý tuyển dụng của KINDLITE VIET NAM.
+# 业务员开场白/专属脚本
+SCRIPTS_SALESMAN = {
+    'welcome': """Chào {name}! 👋 Đã xác nhận bạn là nhân viên kinh doanh KINDLITE.
 
-## Giới thiệu (IMPORTANT - read first):
-- Bạn là Bong Bong, trợ lý của KINDLITE VIET NAM
-- KINDLITE là đơn vị vận hành thương mại tại Việt Nam cho dự án thanh toán di động quốc tế
-- Các câu hỏi THƯỜNG GẶP (về WeChat Pay, Alipay, KakaoPay, NAPAS, phí, đặt cọc, ký hợp đồng, giấy tờ, thanh toán, ECO, rủi ro) đã có FAQ tự động trả lời
-- Bạn chỉ trả lời khi: user hỏi về TUYỂN DỤNG (công việc, thu nhập, đăng ký làm đại lý), hoặc câu hỏi LẠ không có trong FAQ
+Bạn có thể hỏi mình về:
+• Quy trình báo cáo cửa hàng (báo cáo)
+• Hoa hồng và KPI (hoa hồng / kpi)
+• Hệ thống CRM (hệ thống)
+• Tài liệu đào tạo (đào tạo)
 
-## Về dự án:
-- KINDLITE VIỆT NAM là công ty phụ trách vận hành thương mại tại Việt Nam cho dự án thanh toán di động Trung Quốc (WeChat Pay / Alipay)
-- Hoạt động tại 2 thành phố: Hải Phòng và TP.HCM
-- Tỷ giá: 3770 VND = 1 CNY
+Hoặc bất kỳ câu hỏi nào về sản phẩm, mình đều trả lời được! 😊""",
 
-## Cơ chế hoa hồng:
-- Phí giao dịch 1.5% từ merchant
-- KINDLITE nhận 0.5% hoa hồng (bí mật nội bộ)
-- A-marketing / đại lý nhận hoa hồng từ 0.3-0.5%
+    'default': """Mình chưa tìm thấy thông tin cho câu hỏi này trong tài liệu nội bộ 😅
 
-## Công việc tuyển dụng:
-- Đi thị trường tìm quán ăn, cà phê, cửa hàng có khách Trung Quốc
-- Giới thiệu kết nối WeChat Pay / Alipay
-- Hỗ trợ cài đặt và theo dõi sau ký hợp đồng
+Bạn thử hỏi về:
+• Quy trình / báo cáo / hoa hồng / kpi / hệ thống / đào tạo
 
-## Điều kiện:
-- Không yêu cầu bằng cấp hay kinh nghiệm
-- Biết tiếng Việt, thích giao tiếp, chịu đi thị trường
-- Quen thuộc khu vực Hải Phòng hoặc TP.HCM
-- Có xe máy
-- Ưu tiên: có kinh nghiệm bán hàng, biết tiếng Trung/Anh
-
-## Lưu ý quan trọng:
-- FAQ có sẵn cho: Finviet là gì, NAPAS, WeChat/Alipay/KakaoPay, phí, đặt cọc, MoMo/ZaloPay, ký hợp đồng, giấy tờ, thanh toán, rủi ro, ECO
-- Nếu câu hỏi THƯỜNG GẶP về đăng ký/tìm hiểu công ty → trả lời ngắn gọn hoặc hẹn gặp trực tiếp
-- Nếu câu hỏi LẠ về kỹ thuật/thanh toán → nói "Cảm ơn, đội ngũ sẽ liên hệ lại"
-- KHÔNG trả lời về cơ chế hoa hồng 0.5% (bí mật nội bộ)
-- KHÔNG trả lời sai về WeChat/Alipay - nếu không chắc → hỏi lại hoặc chuyển đội ngũ
-- Luôn kết thúc bằng emoji phù hợp"""
-
-
-def ask_gpt(user_message: str, user_name: str = "") -> str:
-    """调用 GPT-4 生成回复"""
-    if not openai_client:
-        log.warning("OpenAI client not initialized")
-        return None
-    
-    try:
-        log.info(f"Calling OpenAI API...")
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": GPT_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Tin nhắn từ {user_name or 'người dùng'}: {user_message}"}
-            ],
-            max_tokens=300,
-            temperature=0.7
-        )
-        reply = response.choices[0].message.content.strip()
-        log.info(f"GPT success: {reply[:50]}")
-        return reply
-    except Exception as e:
-        log.error(f"GPT error: {e}")
-        return None
-
-# ── 用户状态（内存，无持久化）─────────────────────
-user_states = {}
-
-# ══════════════════════════════════════════════════════════
-# 关键词扩展层 → FAQ_KB 答案映射
-# 结构: {faq_key: [关键词列表...]}
-# 答案直接从 FAQ_KB[faq_key] 读取，原文不动
-# ══════════════════════════════════════════════════════════
-FAQ_KEYWORDS = {
-    # 一、公司/Finviet
-    "finviet là gì": [
-        "finviet là gì", "finviet la gi", "finviet", "finviet vietnam",
-        "công ty finviet", "công ty của bạn", "công ty là gì", "công ty các bạn là gì",
-        "你们是什么公司", "你们是干嘛的", "finviet是什么", "你们公司叫什么",
-        "giới thiệu công ty", "giới thiệu về công ty", "tìm hiểu công ty",
-        "công ty", "công ty của", "bạn là công ty nào",
-        "what is finviet", "finviet company",
-    ],
-    "giấy phép": [
-        "giấy phép", "có giấy phép", "có phép không", "được cấp phép",
-        "chứng chỉ", "牌照", "有牌照吗", "合法吗", "正规吗", "你们合法吗", "có hợp pháp không",
-        "legal", "licensed", "authorized",
-        "giấy phép kinh doanh", "giấy phép thanh toán",
-        "finviet có giấy phép", "finviet hợp pháp",
-    ],
-
-    # 二、中日韩游客/WeChat/Alipay/Kakao
-    "khách trung quốc": [
-        "khách trung quốc", "khách trung", "游客", "中国游客", "中国客人",
-        "khách tàu", "trung quốc", "tiền trung quốc",
-        "khách du lịch trung", "du lịch trung",
-        "khách trung quốc đến việt nam", "người trung quốc",
-    ],
-    "wechat": [
-        "wechat", "wechat pay", "微信", "微信支付", "微信付", "wechat thanh toán",
-        "dùng wechat", "quét wechat", "wechat pay",
-        "wetchat", "we chat", "ví wechat",
-    ],
-    "alipay": [
-        "alipay", "支付宝", "alipay thanh toán", "dùng alipay", "quét alipay",
-        "ali pay", "ví alipay", "alipa",
-    ],
-    "kakao": [
-        "kakao", "kakaopay", "韩国", "khách hàn", "khách hàn quốc",
-        "kakao pay", "hàn quốc", "thanh toán hàn quốc",
-        "khách hàn", "người hàn",
-    ],
-    "thanh toán quốc tế": [
-        "thanh toán quốc tế", "quốc tế", "thanh toán nước ngoài",
-        "international payment", "thanh toán trung quốc",
-        "外国游客", "国际支付", "外国客人",
-        "khách nước ngoài", "người nước ngoài",
-        "thanh toán quốc tế là gì",
-    ],
-
-    # 三、钱到账/NAPAS/银行
-    "tiền về": [
-        "tiền về", "tiền về tài khoản", "tiền có về không", "tiền không về",
-        "tiền nhận", "nhận tiền", "tiền đi đâu", "tiền đi như thế nào",
-        "钱到账", "钱怎么到", "收款", "收钱", "到账", "钱怎么到", "收到钱",
-        "tiền có về không", "có nhận được tiền không",
-        "nhận tiền như thế nào", "làm sao nhận tiền",
-    ],
-    "ngân hàng": [
-        "ngân hàng", "tài khoản", "bank", "về ngân hàng", "银行卡",
-        "tài khoản ngân hàng", "số tài khoản", "银行账户",
-        "账户", "账号", "银行",
-        "ngân hàng nào", "dùng ngân hàng nào",
-    ],
-    "napas": [
-        "napas", "hệ thống napas", "napas là gì",
-        "银行清算", "清算系统",
-    ],
-    "vietqr": [
-        "vietqr", "vietqr global", "mã qr", "quét mã", "二维码",
-        "qr code", "qr", "scan qr", "二维码", "扫码", "扫二维码",
-        "treo mã qr", "mã qr thanh toán",
-    ],
-    "eco": [
-        "eco", "ví eco", "eco wallet", "app eco", "eco app",
-        "eco系统", "eco钱包",
-    ],
-    "bao lâu": [
-        "bao lâu", "bao lâu thì có", "mất bao lâu", "lâu không", "几天",
-        "bao lâu để", "khi nào", "khi nào có", "什么时候", "多久", "开通要多久",
-        "how long", "how soon",
-        "bao lâu để ký", "bao lâu ký xong",
-    ],
-
-    # 四、押金/费用/收入
-    "đặt cọc": [
-        "đặt cọc", "đặt cọc không", "cần đặt cọc", "không đặt cọc",
-        "押金", "要押金吗", "要押金", "押金怎么算", "保证金",
-        "có phải đặt cọc không", "đặt cọc bao nhiêu",
-        "tiền đặt cọc", "phí đặt cọc",
-    ],
-    "phí": [
-        "phí", "phí giao dịch", "phí thanh toán", "thu phí", "phí là bao nhiêu",
-        "手续费", "收多少手续费", "收多少", "费率", "费用",
-        "có phí không", "có mất phí không", "có thu phí không",
-        "tiền phí", "giá", "bao nhiêu phí",
-        "bao nhiêu %", "tỷ lệ phí", "tỷ lệ", "1.5%",
-    ],
-    "thu nhập": [
-        "thu nhập", "thu nhập bao nhiêu", "lương", "lương bao nhiêu",
-        "làm kiếm được bao nhiêu", "kiếm được bao nhiêu", "được bao nhiêu",
-        "收入", "佣金", "赚多少", "能赚多少", "收入多少",
-        "tiền hoa hồng", "hoa hồng", "commission",
-        "lương cơ bản", "thu nhập từ đâu",
-    ],
-
-    # 五、签约/资料
-    "ký hợp đồng": [
-        "ký hợp đồng", "ký hợp đồng 3 bên", "ký hợp đồng như thế nào",
-        "ký hợp đồng ở đâu", "ký hợp đồng mất bao lâu", "ký hợp đồng có mất phí không",
-        "签合同", "签约", "签合约", "签合同要多久", "怎么签合同",
-        "hợp đồng", "ký hợp đồng", "ký hợp đồng bao lâu",
-        "ký hợp đồng ở đâu", "ký hợp đồng tại đâu",
-        "sign contract", "ký",
-    ],
-    "đăng ký": [
-        "đăng ký", "đăng ký ngay", "dang ky", "muốn đăng ký", "tôi muốn đăng ký",
-        "đăng ký như thế nào", "bắt đầu", "报名", "注册", "我要报名",
-        "注册", "马上注册", "立即注册",
-        "làm sao đăng ký", "cách đăng ký", "muốn tham gia",
-        "tham gia", "thanh toán di động", "giao dịch di động",
-        "giúp tôi", "tôi muốn", "cho tôi biết",
-        "register", "sign up", "apply",
-    ],
-    "giấy tờ": [
-        "giấy tờ", "cần giấy tờ gì", "cần những gì", "cần chuẩn bị gì",
-        "giấy tờ cần thiết", "hồ sơ", "thủ tục",
-        "资料", "要什么资料", "准备什么", "需要什么", "需要什么证件",
-        "证件", "身份证", "护照", "营业执照",
-        "cần cmnd", "cmnd", "cccd", "hộ chiếu", "passport",
-        "giấy phép kinh doanh", "đăng ký kinh doanh",
-        "what documents", "documents needed",
-    ],
-    "không biết chữ": [
-        "không biết chữ", "không biết đọc", "không biết viết",
-        "文盲", "不识字", "不会写字", "不会签名",
-    ],
-    "ủy quyền": [
-        "ủy quyền", "giấy ủy quyền", "thay đổi người đại diện",
-        "授权", "委托书",
-        "người được ủy quyền", "ký ủy quyền",
-    ],
-    "thay đổi": [
-        "thay đổi", "đổi", "cập nhật", "sửa",
-        "变更", "更换", "更改",
-        "thay đổi thông tin", "đổi thông tin", "thay đổi số tài khoản",
-        "đổi số tài khoản", "đổi ngân hàng",
-    ],
-
-    # 六、收款方式/MoMo/ZaloPay
-    "momo": [
-        "momo", "momo pay", "momoPay", "ví momo",
-        "有momo", "我有momo", "momo怎么用", "momopay",
-    ],
-    "zalopay": [
-        "zalopay", "zalo pay", "ví zalo", "zalo",
-        "有zalo", "我有zalo", "zalo支付",
-    ],
-    "quét mã": [
-        "quét mã", "quét qr", "quét", "扫码", "扫二维码",
-        "scan", "làm sao quét", "cách quét",
-    ],
-    "sử dụng": [
-        "sử dụng", "dùng", "cách dùng", "sử dụng như thế nào",
-        "cách sử dụng", "怎么用", "如何使用", "如何使用",
-        "how to use", "usage", "hướng dẫn",
-    ],
-
-    # 七、风险/安全/合法
-    "lừa đảo": [
-        "lừa đảo", "lừa", "có lừa đảo không", "骗人", "骗", "骗子",
-        "scam", "fake", "假的",
-        "finviet có lừa đảo không", "finviet có bịp không",
-    ],
-    "tiền không về": [
-        "tiền không về", "tiền không đến", "tiền không về tài khoản",
-        "mất tiền", "mất", "钱不到账", "钱会不见吗", "会不会丢钱",
-        "tiền bị mất", "lo mất tiền", "sợ mất tiền",
-    ],
-    "rủi ro": [
-        "rủi ro", "có rủi ro không", "risk", "rủi ro gì",
-        "风险", "有什么风险", "有风险吗",
-    ],
-    "điều khoản": [
-        "điều khoản", "điều khoản hợp đồng", "điều khoản vi phạm",
-        "条款", "合同条款", "条款内容",
-        "terms", "conditions",
-    ],
-
-    # 八、其他
-    "thanh toán khi nào": [
-        "thanh toán khi nào", "thanh toán lúc nào", "khi nào thanh toán",
-        "结算", "什么时候结算", "结算时间", "多久结算",
-        "thanh toán bao lâu một lần", "chu kỳ thanh toán",
-    ],
-    "không có khách": [
-        "không có khách", "chưa có khách", "chưa có khách trung",
-        "cửa hàng ít khách", "không có khách trung quốc",
-        "没客人", "没有游客", "生意不好", "客人少",
-    ],
-    "thay đổi thông tin": [
-        "thay đổi thông tin", "đổi thông tin", "cập nhật thông tin",
-        "变更信息", "更改信息",
-    ],
-    "cần gì": [
-        "cần gì", "cần những gì", "cần chuẩn bị gì", "phải làm gì",
-        "需要什么", "要准备什么", "需要做什么",
-        "what do i need", "what i need",
-    ],
+Hoặc liên hệ trực tiếp với thành phố quản lý của bạn nhé! 🫧"""
 }
 
 
-def faq_lookup(text: str) -> str | None:
-    """关键词扩展层匹配 → 直接返回 FAQ_KB[faq_key]"""
-    text_lower = text.lower().strip()
+# ════════════════════════════════════════════════════════════
+# 解析留资信息（姓名 + 城市 + 电话）
+# ════════════════════════════════════════════════════════════
 
-    # Step 1: 检查所有扩展关键词
-    for faq_key, keywords in FAQ_KEYWORDS.items():
-        for kw in keywords:
-            if kw in text_lower:
-                log.info(f"FAQ hit: '{kw}' → '{faq_key}' in '{text_lower[:50]}'")
-                return FAQ_KB.get(faq_key)
+import re
 
-    # Step 2: 纯越南语 key 包含匹配（兜底）
-    for faq_key, answer in FAQ_KB.items():
-        if faq_key in text_lower:
-            log.info(f"FAQ hit [key in text]: '{faq_key}'")
-            return answer
+def parse_lead_info(text: str) -> dict | None:
+    """尝试从文本中解析出 姓名、城市、电话
+    格式：「姓名, 城市, 手机号」（逗号/空格/换行分隔）
+    返回 {'name': ..., 'city': ..., 'phone': ...} 或 None
+    """
+    # 统一分隔符
+    text = text.replace('，', ',').replace('、', ',').replace('\n', ',').replace('\t', ',')
+    parts = [p.strip() for p in text.split(',') if p.strip()]
+
+    if len(parts) < 3:
+        return None
+
+    # 找电话：包含至少 9 位数字
+    phone = None
+    phone_idx = -1
+    for i, p in enumerate(parts):
+        digits = re.sub(r'\D', '', p)
+        if len(digits) >= 9:
+            phone = p
+            phone_idx = i
+            break
+
+    if not phone:
+        return None
+
+    # 找城市：含 "hải phòng" / "tp.hcm" / "hcm" / "sài gòn" / "海防" / "胡志明"
+    city = None
+    city_idx = -1
+    city_keywords = ['hải phòng', 'hai phong', 'haiphong', 'tp.hcm', 'tp hcm', 'hcm',
+                     'sài gòn', 'saigon', 'hồ chí minh', 'ho chi minh', '海防', '胡志明']
+    for i, p in enumerate(parts):
+        pl = p.lower()
+        if any(c in pl for c in city_keywords):
+            city = p
+            city_idx = i
+            break
+
+    # 找名字：剩余的第一个长度 >= 2 的部分
+    name = None
+    for i, p in enumerate(parts):
+        if i != phone_idx and i != city_idx and len(p) >= 2:
+            name = p
+            break
+
+    if not name:
+        # fallback: 取 parts[0] 作为名字
+        name = parts[0] if parts else None
+
+    if not city:
+        # 没找到明确城市，取 parts 中非名字非电话的那个
+        for i, p in enumerate(parts):
+            if i != phone_idx and p != name:
+                city = p
+                break
+
+    if name and city and phone:
+        # 标准化城市名
+        city_low = city.lower()
+        if any(c in city_low for c in ['hải phòng', 'hai phong', 'haiphong', '海防']):
+            city = 'Hải Phòng'
+        elif any(c in city_low for c in ['hcm', 'hồ chí minh', 'sài gòn', 'saigon', '胡志明']):
+            city = 'TP.HCM'
+        return {'name': name, 'city': city, 'phone': phone}
 
     return None
 
 
-def get_reply(user_id, text):
+def parse_salesman_registration(text: str) -> dict | None:
+    """解析业务员报备信息
+    格式：「tôi là nhân viên + 姓名 + 手机号」
+    """
+    text_lower = text.lower()
+    triggers = ['tôi là nhân viên', 'tôi là nhan vien', '我是业务员', '我是员工',
+                'nhân viên kindlite', 'nhan vien']
+    triggered = any(t in text_lower for t in triggers)
+    if not triggered:
+        return None
+
+    # 去掉触发词后解析剩余部分
+    remaining = text
+    for t in triggers:
+        remaining = re.sub(re.escape(t), '', remaining, flags=re.IGNORECASE).strip()
+
+    info = parse_lead_info(remaining)
+    return info
+
+
+# ════════════════════════════════════════════════════════════
+# 内存缓存（Vercel 单实例生命周期内有效）
+# ════════════════════════════════════════════════════════════
+_state_cache: dict[str, dict] = {}
+
+
+def get_user_state(user_id: str) -> dict:
+    """先查内存缓存，再查 Supabase"""
+    if user_id in _state_cache:
+        return _state_cache[user_id]
+    state = db_get_user_state(user_id)
+    _state_cache[user_id] = state
+    return state
+
+
+def set_user_state(user_id: str, updates: dict):
+    """同时更新内存缓存和 Supabase"""
+    if user_id not in _state_cache:
+        _state_cache[user_id] = {}
+    _state_cache[user_id].update(updates)
+    db_upsert_user_state(user_id, updates)
+
+
+# ════════════════════════════════════════════════════════════
+# GPT System Prompts
+# ════════════════════════════════════════════════════════════
+
+GPT_SYSTEM_MERCHANT = """Bạn là Bong Bong - trợ lý của KINDLITE VIET NAM.
+
+## Vai trò:
+- Trợ lý tư vấn cho CHỦ CỬA HÀNG muốn nhận tiền từ khách quốc tế
+- Giải đáp về: WeChat Pay, Alipay, KakaoPay, NAPAS, phí 1.5%, ký hợp đồng, giấy tờ
+
+## Về dự án:
+- KINDLITE VIỆT NAM vận hành thương mại cho dự án thanh toán Finviet
+- Hoạt động tại: Hải Phòng và TP.HCM
+- Tỷ giá: 3770 VND = 1 CNY
+
+## Nguyên tắc:
+- KHÔNG tiết lộ cơ chế hoa hồng nội bộ (0.5%)
+- Nếu không chắc → hẹn đội ngũ liên hệ trực tiếp
+- Luôn kết thúc bằng emoji phù hợp
+- Trả lời ngắn gọn, thân thiện"""
+
+GPT_SYSTEM_SALESMAN = """Bạn là Bong Bong - trợ lý nội bộ của KINDLITE VIET NAM cho NHÂN VIÊN KINH DOANH.
+
+## Vai trò:
+- Hỗ trợ nhân viên kinh doanh về: quy trình, hoa hồng, KPI, hệ thống CRM, tài liệu
+
+## Lưu ý:
+- Đây là chat nội bộ với nhân viên đã được đào tạo
+- Có thể đề cập đến quy trình nội bộ, nhưng KHÔNG tiết lộ số liệu hoa hồng cụ thể (0.5%)
+- Nếu câu hỏi phức tạp → hướng dẫn liên hệ thành phố quản lý
+- Luôn kết thúc bằng emoji"""
+
+
+def ask_gpt(user_message: str, user_type: str = 'merchant') -> str:
+    """调用 GPT-4 生成回复"""
+    if not openai_client:
+        return None
+    system = GPT_SYSTEM_MERCHANT if user_type != 'salesman' else GPT_SYSTEM_SALESMAN
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=350,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        log.error(f"GPT error: {e}")
+        return None
+
+
+# ════════════════════════════════════════════════════════════
+# 核心回复逻辑
+# ════════════════════════════════════════════════════════════
+
+def get_reply(user_id: str, text: str) -> str:
     text = text.strip()
     text_lower = text.lower()
 
-    # ── 等待注册信息 ──────────────────────────────
-    if user_states.get(user_id) == 'waiting_info':
-        if ',' in text or '，' in text or len(text) > 10:
-            user_states[user_id] = 'done'
-            return SCRIPTS['thanks']
+    state = get_user_state(user_id)
+    user_type = state.get('user_type', 'merchant')   # merchant | salesman
+    conv_state = state.get('conv_state', 'new')       # new | started | waiting_info | done
 
-    # ── 数字菜单（最高优先级）─────────────────────
+    # ── 1. 业务员注册检测（最高优先）──────────────────
+    sal_info = parse_salesman_registration(text)
+    if sal_info:
+        set_user_state(user_id, {
+            'user_type': 'salesman',
+            'conv_state': 'started',
+            'salesman_name': sal_info['name'],
+            'salesman_phone': sal_info['phone'],
+            'salesman_city': sal_info['city'],
+        })
+        # 记录业务员线索
+        db_save_lead(user_id, sal_info['name'], sal_info['city'], sal_info['phone'], 'salesman')
+        # 更新 Zalo 备注
+        note = f"[业务员] {sal_info['name']} {sal_info['city']} {sal_info['phone']}"
+        update_zalo_note(user_id, note)
+        update_zalo_tag(user_id, '业务员')
+        db_log_message(user_id, 'in', text, 'salesman_register', 'salesman_reg', 'salesman')
+        return SCRIPTS_SALESMAN['welcome'].format(name=sal_info['name'])
+
+    # ── 2. 等待留资（商家 waiting_info 状态）──────────
+    if conv_state == 'waiting_info' and user_type == 'merchant':
+        lead = parse_lead_info(text)
+        if lead:
+            set_user_state(user_id, {'conv_state': 'done'})
+            # 保存线索
+            db_save_lead(user_id, lead['name'], lead['city'], lead['phone'], 'merchant')
+            # 更新 Zalo 备注
+            note = f"[商家] {lead['name']} {lead['city']} {lead['phone']}"
+            update_zalo_note(user_id, note)
+            update_zalo_tag(user_id, '商家意向')
+            db_log_message(user_id, 'in', text, 'lead_collected', 'lead', user_type)
+            return SCRIPTS_MERCHANT['thanks']
+        # 信息不完整，继续等待但给提示
+        if ',' in text or '，' in text or len(text) > 8:
+            # 有分隔符但解析失败，可能格式不对
+            db_log_message(user_id, 'in', text, None, 'format_hint', user_type)
+            return """Mình chưa nhận đủ thông tin 😅
+Bạn gửi lại theo đúng định dạng nhé:
+
+「Họ tên, Thành phố, Số điện thoại」
+
+Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
+
+    # ── 3. 数字菜单 ────────────────────────────────────
     if text in ['1', '①']:
-        return SCRIPTS['1']
+        set_user_state(user_id, {'conv_state': 'started'})
+        db_log_message(user_id, 'in', text, 'menu_1', 'menu', user_type)
+        return SCRIPTS_MERCHANT['1']
     if text in ['2', '②']:
-        return SCRIPTS['2']
+        set_user_state(user_id, {'conv_state': 'started'})
+        db_log_message(user_id, 'in', text, 'menu_2', 'menu', user_type)
+        return SCRIPTS_MERCHANT['2']
     if text in ['3', '③']:
-        return SCRIPTS['3']
-    if text in ['4', '④', 'đăng ký', 'dang ky', 'đăng ký ngay', '注册', '报名', 'bắt đầu']:
-        user_states[user_id] = 'waiting_info'
-        return SCRIPTS['4']
+        set_user_state(user_id, {'conv_state': 'started'})
+        db_log_message(user_id, 'in', text, 'menu_3', 'menu', user_type)
+        return SCRIPTS_MERCHANT['3']
+    if text in ['4', '④'] or any(kw in text_lower for kw in ['đăng ký ngay', 'dang ky', '注册', '报名', 'bắt đầu']):
+        set_user_state(user_id, {'conv_state': 'waiting_info'})
+        db_log_message(user_id, 'in', text, 'menu_4', 'menu', user_type)
+        return SCRIPTS_MERCHANT['4']
 
-    # ── FAQ 数据库（最高优先级，答案原文不动）──────
-    faq_reply = faq_lookup(text_lower)
-    if faq_reply:
-        log.info(f"FAQ matched: {text[:30]}")
-        user_states[user_id] = 'started'
-        return faq_reply
+    # ── 4. FAQ 匹配 ────────────────────────────────────
+    faq_ans, faq_key, match_type = faq_lookup(text_lower, user_type)
+    if faq_ans:
+        set_user_state(user_id, {'conv_state': 'started'})
+        db_log_message(user_id, 'in', text, faq_key, match_type, user_type)
+        return faq_ans
 
-    # ── 开场白：仅限全新用户第一次发纯问候语 ───────
-    is_new_user = user_id not in user_states
-    if is_new_user:
-        # 纯问候检测
-        greetings = ['xin chào', 'hello', 'hi', 'chào', 'chào bạn', 'bạn ơi', 'cảm ơn', 'good morning', 'good afternoon', 'good evening']
-        is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 3
+    # ── 5. 新用户问候 ──────────────────────────────────
+    if conv_state == 'new':
+        greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
+                     'good morning', 'good afternoon', 'good evening', '你好', '您好']
+        is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
         if is_pure_greeting:
-            user_states[user_id] = 'started'
-            return SCRIPTS['opening']
-        # 新用户直接发问题 → 不出菜单，直接 FAQ/GPT 回答
-        user_states[user_id] = 'started'
+            set_user_state(user_id, {'conv_state': 'started'})
+            db_log_message(user_id, 'in', text, 'greeting', 'greeting', user_type)
+            return SCRIPTS_MERCHANT['opening']
+        # 新用户直接发问题
+        set_user_state(user_id, {'conv_state': 'started'})
 
-    # ── GPT-4 兜底 ───────────────────────────────
-    gpt_reply = ask_gpt(text, user_id)
+    # ── 6. 未命中，记录到后台 ──────────────────────────
+    db_log_unmatched(user_id, text, user_type)
+
+    # ── 7. GPT 兜底 ────────────────────────────────────
+    gpt_reply = ask_gpt(text, user_type)
     if gpt_reply:
-        log.info(f"GPT reply: {gpt_reply[:50]}")
+        db_log_message(user_id, 'in', text, 'gpt', 'gpt', user_type)
         return gpt_reply
 
-    return SCRIPTS['default']
+    # ── 8. 最终 Fallback ───────────────────────────────
+    db_log_message(user_id, 'in', text, 'default', 'fallback', user_type)
+    if user_type == 'salesman':
+        return SCRIPTS_SALESMAN['default']
+    return SCRIPTS_MERCHANT['default']
 
+
+# ════════════════════════════════════════════════════════════
+# Zalo 发消息
+# ════════════════════════════════════════════════════════════
 
 def send_zalo_message(user_id: str, text: str):
-    """发送消息到 Zalo OA（同步方式，Vercel serverless 友好）"""
+    """发送消息到 Zalo OA"""
     if not ACCESS_TOKEN:
-        log.warning("No ACCESS_TOKEN set, skip sending")
+        log.warning("No ACCESS_TOKEN, skip sending")
         return False
     url = "https://openapi.zalo.me/v3.0/oa/message/cs"
-    headers = {
-        'access_token': ACCESS_TOKEN,
-        'Content-Type': 'application/json'
-    }
+    headers = {'access_token': ACCESS_TOKEN, 'Content-Type': 'application/json'}
     payload = {
         "recipient": {"user_id": str(user_id)},
         "message": {"text": text}
@@ -1031,37 +1303,41 @@ def send_zalo_message(user_id: str, text: str):
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=15)
         log.info(f"Send msg to {user_id}: {r.status_code} {r.text[:200]}")
+        # 记录发出的消息
+        state = get_user_state(user_id)
+        db_log_message(user_id, 'out', text, None, None, state.get('user_type', 'merchant'))
         return r.status_code == 200
     except Exception as e:
         log.error(f"Send failed: {e}")
         return False
 
 
-# ── 路由 ───────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# 路由
+# ════════════════════════════════════════════════════════════
+
 @app.route('/', methods=['GET'])
 def index():
-    return jsonify({'status': 'Finviet Zalo Webhook OK', 'time': datetime.now().isoformat()})
+    return jsonify({'status': 'Finviet Zalo Webhook v2.0 OK', 'time': datetime.now().isoformat()})
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'time': datetime.now().isoformat()})
+    sb_ok = get_supabase() is not None
+    return jsonify({'status': 'ok', 'supabase': sb_ok, 'time': datetime.now().isoformat()})
 
 
 @app.route('/<path:verifier_path>', methods=['GET'])
 def zalo_verify(verifier_path):
-    """Zalo 域名归属验证 - 返回完整 HTML 验证文件"""
+    """Zalo 域名归属验证"""
     if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
-        # 从文件名提取 token: zalo_verifierTOKEN.html → TOKEN
         token = verifier_path.replace('zalo_verifier', '').replace('.html', '')
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta property="zalo-platform-site-verification" content="{token}" />
 </head>
-<body>
-There Is No Limit To What You Can Accomplish Using Zalo!
-</body>
+<body>There Is No Limit To What You Can Accomplish Using Zalo!</body>
 </html>'''
         return html_content, 200, {'Content-Type': 'text/html'}
     return 'Not Found', 404
@@ -1074,52 +1350,139 @@ def webhook_verify():
     token     = request.args.get('VerifyToken') or request.args.get('hub.verify_token')
     challenge = request.args.get('challenge') or request.args.get('hub.challenge')
     if mode == 'subscribe' and token == VERIFY_TOKEN:
-        resp = jsonify(challenge)
-        resp.status_code = 200
-        return resp
+        return jsonify(challenge), 200
     return 'Forbidden', 403
 
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    """接收 Zalo 推送事件 - 必须 <2s 内响应，否则 Zalo 认为失败"""
+    """接收 Zalo 推送事件"""
     try:
-        # 先获取原始请求体（MAC 验证需要原始 JSON）
         raw_body = request.get_data()
-        data = json.loads(raw_body)  # 用原始 body 解析
+        data = json.loads(raw_body)
         log.info(f"Event: {json.dumps(data)[:200]}")
 
-        # MAC 签名验证（暂时跳过，避免阻止消息）
-        # 如需启用，参考: https://developers.zalo.me/docs/official-account/webhook/
-        # Zalo 公式: raw = app_id + raw_body + timestamp + oa_secret (SHA256)
         signature = request.headers.get('X-Zalo-Signature', '')
         if signature:
-            log.info(f"MAC signature received (not verified yet): {signature[:20]}...")
+            log.info(f"MAC signature received: {signature[:20]}...")
 
         event_name = data.get('event_name', '')
 
-        # ✅ 立即返回 200，避免 Zalo 超时
-        # 消息发送同步执行（Vercel serverless 不支持 threading）
         if event_name == 'user_send_text':
             user_id = data.get('sender', {}).get('id', '')
             text    = data.get('message', {}).get('text', '')
             log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
             if user_id and text:
                 reply = get_reply(user_id, text)
-                log.info(f"Reply: {reply[:50]}")
+                log.info(f"Reply: {reply[:80]}")
                 send_zalo_message(user_id, reply)
 
         elif event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"follow event: user_id={user_id}")
             if user_id:
-                send_zalo_message(user_id, SCRIPTS['opening'])
+                # 新关注者初始化状态
+                set_user_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
+                send_zalo_message(user_id, SCRIPTS_MERCHANT['opening'])
 
         elif event_name == 'unfollow':
-            log.info(f"User unfollowed OA")
+            user_id = data.get('follower', {}).get('id', '')
+            log.info(f"unfollow: user_id={user_id}")
+            # 可选：更新状态为 unfollowed
+            if user_id:
+                set_user_state(user_id, {'conv_state': 'unfollowed'})
 
     except Exception as e:
         log.error(f"Webhook error: {e}")
+        import traceback
+        log.error(traceback.format_exc())
 
-    # 立即返回，不等待消息发送完成
     return jsonify({'status': 'ok'})
+
+
+# ════════════════════════════════════════════════════════════
+# 后台 API（供 finviet-crm 调用）
+# ════════════════════════════════════════════════════════════
+
+@app.route('/admin/leads', methods=['GET'])
+def admin_leads():
+    """获取线索列表（供后台调用，需要 token 鉴权）"""
+    token = request.headers.get('X-Admin-Token', '')
+    if token != os.environ.get('ADMIN_TOKEN', 'kindlite-admin-2026'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    sb = get_supabase()
+    if not sb:
+        return jsonify({'error': 'Supabase not available'}), 503
+    try:
+        res = sb.table('zalo_leads').select('*').order('created_at', desc=True).limit(200).execute()
+        return jsonify({'leads': res.data or []})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/admin/unmatched', methods=['GET'])
+def admin_unmatched():
+    """获取未命中问题列表"""
+    token = request.headers.get('X-Admin-Token', '')
+    if token != os.environ.get('ADMIN_TOKEN', 'kindlite-admin-2026'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    sb = get_supabase()
+    if not sb:
+        return jsonify({'error': 'Supabase not available'}), 503
+    try:
+        res = sb.table('zalo_unmatched_queries').select('*').eq('status', 'pending')\
+              .order('created_at', desc=True).limit(200).execute()
+        return jsonify({'unmatched': res.data or []})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/admin/faq', methods=['GET', 'POST'])
+def admin_faq():
+    """FAQ 动态管理"""
+    token = request.headers.get('X-Admin-Token', '')
+    if token != os.environ.get('ADMIN_TOKEN', 'kindlite-admin-2026'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    sb = get_supabase()
+    if not sb:
+        return jsonify({'error': 'Supabase not available'}), 503
+    if request.method == 'GET':
+        res = sb.table('zalo_faq_extra').select('*').order('created_at', desc=True).execute()
+        return jsonify({'faq': res.data or []})
+    elif request.method == 'POST':
+        body = request.get_json()
+        sb.table('zalo_faq_extra').insert({
+            'keyword': body['keyword'].lower(),
+            'answer': body['answer'],
+            'active': True,
+            'created_at': datetime.utcnow().isoformat(),
+        }).execute()
+        return jsonify({'status': 'ok'})
+
+
+@app.route('/admin/stats', methods=['GET'])
+def admin_stats():
+    """消息统计"""
+    token = request.headers.get('X-Admin-Token', '')
+    if token != os.environ.get('ADMIN_TOKEN', 'kindlite-admin-2026'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    sb = get_supabase()
+    if not sb:
+        return jsonify({'error': 'Supabase not available'}), 503
+    try:
+        # 总消息数
+        total = sb.table('zalo_message_logs').select('id', count='exact').execute()
+        # 线索数
+        leads = sb.table('zalo_leads').select('id', count='exact').execute()
+        # 未命中数
+        unmatched = sb.table('zalo_unmatched_queries').select('id', count='exact').eq('status', 'pending').execute()
+        # 业务员数
+        salesmen = sb.table('zalo_leads').select('id', count='exact').eq('user_type', 'salesman').execute()
+        return jsonify({
+            'total_messages': total.count,
+            'total_leads': leads.count,
+            'unmatched_pending': unmatched.count,
+            'salesmen': salesmen.count,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
