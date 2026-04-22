@@ -789,6 +789,32 @@ SALESMAN_FAQ_KB = {
 如果没有收到培训手册，请联系你的城市管理员 😊""",
 }
 
+# ════════════════════════════════════════════════════════════
+# 快速回复（简化版，用于 get_reply_simple）
+# ════════════════════════════════════════════════════════════
+
+QUICK_REPLIES = {
+    "hello": "Xin chào! 👋 Tôi là Bong Bong, trợ lý của KINDLITE VIET NAM. Bạn cần hỗ trợ gì hôm nay?",
+    "hi": "Xin chào! 👋 Bạn có câu hỏi gì về Finviet không? Tôi sẵn sàng giúp bạn!",
+    "xin chào": "Xin chào! 👋 Tôi là Bong Bong, trợ lý của KINDLITE VIET NAM. Bạn cần hỗ trợ gì hôm nay?",
+    "chào": "Xin chào! 👋 Tôi là Bong Bong, trợ lý của KINDLITE VIET NAM. Bạn cần hỗ trợ gì hôm nay?",
+    "tôi muốn": "OK! Bạn muốn tìm hiểu về điều gì?\n\n💰 Phí dịch vụ\n📄 Quy trình đăng ký\n💳 Các phương thức thanh toán\n🏪 Hỗ trợ cửa hàng",
+    "đăng ký": "Để đăng ký nhận thanh toán quốc tế, bạn cần:\n\n1️⃣ Cung cấp: Tên cửa hàng, Địa chỉ, Số điện thoại\n2️⃣ Ký hợp đồng với KINDLITE\n3️⃣ Hoàn tất đăng ký\n\nBạn ở thành phố nào? (Hải Phòng / TP.HCM)",
+    "phí": "Finviet thu phí 1.5% trên mỗi giao dịch thành công.\n\n💡 Phí này đã bao gồm:\n- Thanh toán WeChat Pay\n- Thanh toán Alipay\n- Thanh toán KakaoPay\n- Các phương thức khác\n\nBạn có câu hỏi thêm không?",
+    "giá": "Finviet thu phí 1.5% trên mỗi giao dịch thành công.\n\n💡 Phí này đã bao gồm:\n- Thanh toán WeChat Pay\n- Thanh toán Alipay\n- Thanh toán KakaoPay\n- Các phương thức khác\n\nBạn có câu hỏi thêm không?",
+}
+
+QUICK_KEYWORDS = {
+    "xin chào": "Xin chào! 👋 Tôi là Bong Bong, trợ lý của KINDLITE VIET NAM. Bạn cần hỗ trợ gì?",
+    "chào bạn": "Chào bạn! 👋 Tôi có thể giúp gì cho bạn?",
+    "thanh toán": "Finviet hỗ trợ thanh toán quốc tế cho cửa hàng tại Việt Nam.\n\n💳 Chúng tôi nhận:\n- WeChat Pay (Trung Quốc)\n- Alipay (Trung Quốc)\n- KakaoPay (Hàn Quốc)\n\nPhí dịch vụ: 1.5%\n\nBạn muốn tìm hiểu thêm không?",
+    "wechat": "Finviet hỗ trợ thanh toán WeChat Pay cho khách Trung Quốc! 🇨🇳\n\nPhí dịch vụ: 1.5%\n\nBạn có cửa hàng tại Hải Phòng hay TP.HCM?",
+    "alipay": "Finviet hỗ trợ thanh toán Alipay cho khách Trung Quốc! 🇨🇳\n\nPhí dịch vụ: 1.5%\n\nBạn có cửa hàng tại Hải Phòng hay TP.HCM?",
+    "đăng ký": "Để đăng ký, bạn cần cung cấp:\n1️⃣ Tên cửa hàng\n2️⃣ Địa chỉ\n3️⃣ Số điện thoại\n\nBạn ở thành phố nào?",
+    "hỗ trợ": "Tôi có thể hỗ trợ bạn về:\n\n💰 Phí dịch vụ\n📄 Quy trình đăng ký\n💳 Các phương thức thanh toán\n🏪 Hỗ trợ cửa hàng\n\nBạn cần tìm hiểu về gì?",
+    "liên hệ": "Bạn có thể liên hệ đội ngũ KINDLITE qua Zalo OA này.\n\n📞 Hoặc liên hệ trực tiếp tại:\n- Hải Phòng: [số điện thoại]\n- TP.HCM: [số điện thoại]",
+}
+
 SALESMAN_FAQ_KEYWORDS = {
     "hoa hồng": [
         "hoa hồng của tôi", "tiền hoa hồng bao nhiêu", "commission",
@@ -1379,8 +1405,8 @@ Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
 # ════════════════════════════════════════════════════════════
 
 def send_zalo_message(user_id: str, text: str):
-    """发送消息到 Zalo OA（自动刷新 token）"""
-    token = get_access_token()
+    """发送消息到 Zalo OA（使用环境变量里的 token，极简版）"""
+    token = os.environ.get('ZALO_ACCESS_TOKEN', '')
     if not token:
         log.warning("No ACCESS_TOKEN, skip sending")
         return False
@@ -1391,11 +1417,8 @@ def send_zalo_message(user_id: str, text: str):
         "message": {"text": text}
     }
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=15)
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
         log.info(f"Send msg to {user_id}: {r.status_code} {r.text[:200]}")
-        # 记录发出的消息
-        state = get_user_state(user_id)
-        db_log_message(user_id, 'out', text, None, None, state.get('user_type', 'merchant'))
         return r.status_code == 200
     except Exception as e:
         log.error(f"Send failed: {e}")
@@ -1417,34 +1440,73 @@ def health():
     return jsonify({'status': 'ok', 'supabase': sb_ok, 'time': datetime.now(timezone.utc).isoformat()})
 
 
-@app.route('/cron/refresh-token', methods=['POST', 'GET'])
+@app.route('/cron/refresh', methods=['POST', 'GET'])
 def cron_refresh_token():
-    """定时刷新 Zalo Access Token - Vercel Cron 或手动调用"""
+    """定时刷新 Zalo Access Token + 处理消息队列"""
+    results = {'token_refreshed': False, 'messages_sent': 0}
     try:
         new_token = _refresh_access_token()
         if new_token:
-            return jsonify({'status': 'refreshed', 'access_token_preview': new_token[:20] + '...'})
-        else:
-            return jsonify({'status': 'refresh_failed', 'reason': 'check logs'}), 500
+            results['token_refreshed'] = True
     except Exception as e:
-        log.error(f"Cron refresh error: {e}")
+        log.error(f"Token refresh error: {e}")
+
+    # 处理消息队列
+    try:
+        sb = get_supabase()
+        if sb:
+            pending = sb.table('zalo_message_queue').select('*').eq('status', 'pending').limit(50).execute()
+            for msg in pending.data:
+                try:
+                    success = send_zalo_message(msg['user_id'], msg['message'])
+                    if success:
+                        sb.table('zalo_message_queue').update({'status': 'sent'}).eq('id', msg['id']).execute()
+                        results['messages_sent'] += 1
+                    else:
+                        sb.table('zalo_message_queue').update({'status': 'failed'}).eq('id', msg['id']).execute()
+                except:
+                    pass
+    except Exception as e:
+        log.error(f"Queue send error: {e}")
+
+    return jsonify({'status': 'ok', **results})
+
+
+@app.route('/cron/send', methods=['POST', 'GET'])
+def cron_send_messages():
+    """处理消息队列 - 从队列取出消息发送"""
+    try:
+        sb = get_supabase()
+        if not sb:
+            return jsonify({'error': 'Supabase not available'}), 500
+
+        # 获取待发送消息
+        pending = sb.table('zalo_message_queue').select('*').eq('status', 'pending').limit(20).execute()
+        if not pending.data:
+            return jsonify({'status': 'no_pending_messages'})
+
+        sent_count = 0
+        for msg in pending.data:
+            try:
+                user_id = msg['user_id']
+                text = msg['message']
+                msg_id = msg['id']
+
+                # 发送消息
+                success = send_zalo_message(user_id, text)
+                if success:
+                    sb.table('zalo_message_queue').update({'status': 'sent'}).eq('id', msg_id).execute()
+                    sent_count += 1
+                    log.info(f"Sent message to {user_id}")
+                else:
+                    sb.table('zalo_message_queue').update({'status': 'failed'}).eq('id', msg_id).execute()
+            except Exception as e:
+                log.error(f"Failed to send: {e}")
+
+        return jsonify({'status': 'done', 'sent': sent_count})
+    except Exception as e:
+        log.error(f"Cron send error: {e}")
         return jsonify({'error': str(e)}), 500
-
-
-@app.route('/<path:verifier_path>', methods=['GET'])
-def zalo_verify(verifier_path):
-    """Zalo 域名归属验证"""
-    if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
-        token = verifier_path.replace('zalo_verifier', '').replace('.html', '')
-        html_content = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta property="zalo-platform-site-verification" content="{token}" />
-</head>
-<body>There Is No Limit To What You Can Accomplish Using Zalo!</body>
-</html>'''
-        return html_content, 200, {'Content-Type': 'text/html'}
-    return 'Not Found', 404
 
 
 @app.route('/webhook', methods=['GET'])
@@ -1460,51 +1522,42 @@ def webhook_verify():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    """接收 Zalo 推送事件 - 同步生成回复，响应体内直接带消息内容"""
+    """接收 Zalo 推送事件 - 同步处理，Zalo 自动推送回复"""
     try:
         raw_body = request.get_data()
         data = json.loads(raw_body)
         log.info(f"Event: {json.dumps(data)[:200]}")
 
-        signature = request.headers.get('X-Zalo-Signature', '')
-        if signature:
-            log.info(f"MAC signature received: {signature[:20]}...")
-
         event_name = data.get('event_name', '')
 
-        # ── follow：直接回复欢迎语 ─────────────────────────
+        # ── follow：存入队列，立即返回 ─────────────────────────
         if event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"follow event: user_id={user_id}")
             if user_id:
-                set_user_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
-                return jsonify({
-                    'recipient': {'id': str(user_id)},
-                    'message': {'text': SCRIPTS_MERCHANT['opening']}
-                })
+                _do_upsert_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
+                _queue_message(user_id, 'FOLLOW', SCRIPTS_MERCHANT['opening'])
+            return jsonify({'status': 'ok'})
 
-        # ── unfollow：只更新状态，不需要回复 ───────────────
+        # ── unfollow：只记录 ───────────────
         elif event_name == 'unfollow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"unfollow: user_id={user_id}")
             if user_id:
-                set_user_state(user_id, {'conv_state': 'unfollowed'})
+                _do_upsert_state(user_id, {'conv_state': 'unfollowed'})
             return jsonify({'status': 'ok'})
 
-        # ── user_send_text：同步生成回复并返回 ─────────────
+        # ── user_send_text：走完整 FAQ/AI 逻辑 ─────────────
         elif event_name == 'user_send_text':
             user_id = data.get('sender', {}).get('id', '')
             text    = data.get('message', {}).get('text', '')
             log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
             if user_id and text:
-                # 同步获取回复（GPT 有 1.5s 超时保护）
+                # 走完整逻辑：FAQ + GPT 兜底
                 reply = get_reply(user_id, text)
                 log.info(f"Reply: {reply[:80]}")
-                # 在响应体内直接带消息内容，Zalo 会自动推送
-                return jsonify({
-                    'recipient': {'id': str(user_id)},
-                    'message': {'text': reply}
-                })
+                send_zalo_message(user_id, reply)
+            return jsonify({'status': 'ok'})
 
     except Exception as e:
         log.error(f"Webhook error: {e}")
@@ -1512,6 +1565,41 @@ def webhook_receive():
         log.error(traceback.format_exc())
 
     return jsonify({'status': 'ok'})
+
+
+def _queue_message(user_id: str, msg_type: str, text: str):
+    """将待发送消息存入队列（Supabase）"""
+    try:
+        sb = get_supabase()
+        if sb:
+            sb.table('zalo_message_queue').insert({
+                'user_id': str(user_id),
+                'msg_type': msg_type,
+                'message': text,
+                'status': 'pending',
+                'created_at': datetime.now(timezone.utc).isoformat()
+            }).execute()
+            log.info(f"Queued message for {user_id}")
+    except Exception as e:
+        log.error(f"[Queue] error: {e}")
+
+
+def _process_follow(user_id: str):
+    """后台处理 follow 事件"""
+    try:
+        set_user_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
+        time.sleep(0.5)  # 等待一下，避免太快
+        send_zalo_message(user_id, SCRIPTS_MERCHANT['opening'])
+    except Exception as e:
+        log.error(f"[BG] _process_follow error: {e}")
+
+
+def _process_unfollow(user_id: str):
+    """后台处理 unfollow 事件"""
+    try:
+        set_user_state(user_id, {'conv_state': 'unfollowed'})
+    except Exception as e:
+        log.error(f"[BG] _process_unfollow error: {e}")
 
 
 def _process_message(user_id: str, text: str):
@@ -1522,6 +1610,45 @@ def _process_message(user_id: str, text: str):
         send_zalo_message(user_id, reply)
     except Exception as e:
         log.error(f"[BG] process_message error: {e}")
+
+
+def _do_upsert_state(user_id: str, updates: dict):
+    """简单的状态更新（后台执行，不阻塞）"""
+    try:
+        sb = get_supabase()
+        if sb:
+            row = {'user_id': user_id, 'updated_at': datetime.utcnow().isoformat(), **updates}
+            sb.table('zalo_user_states').upsert(row, on_conflict='user_id').execute()
+    except Exception as e:
+        log.error(f"[_do_upsert_state] error: {e}")
+
+
+def get_reply_simple(user_id: str, text: str) -> str:
+    """简化版回复：纯 FAQ 匹配，不用 GPT（快速响应 < 500ms）"""
+    text_lower = text.lower().strip()
+    
+    # 1. 触发词回复
+    for trigger, reply in QUICK_REPLIES.items():
+        if trigger in text_lower:
+            return reply
+    
+    # 2. FAQ 精确匹配
+    text_stripped = text.strip()
+    if text_stripped in FAQ:
+        return FAQ[text_stripped]
+    
+    # 3. FAQ 模糊匹配（关键词）
+    for keyword, reply in FAQ_KEYWORDS.items():
+        if keyword in text_lower:
+            return reply
+    
+    # 4. 关键词模糊匹配
+    for keyword, reply in QUICK_KEYWORDS.items():
+        if keyword in text_lower:
+            return reply
+    
+    # 5. 默认回复（引导用户）
+    return SCRIPTS_MERCHANT.get('default_reply', 'Cảm ơn bạn! Vui lòng liên hệ đội ngũ KINDLITE để được hỗ trợ thêm. 📞')
 
 
 # ════════════════════════════════════════════════════════════
@@ -1610,3 +1737,23 @@ def admin_stats():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ════════════════════════════════════════════════════════════
+# 域名验证（必须放最后，避免干扰其他路由）
+# ════════════════════════════════════════════════════════════
+
+@app.route('/<path:verifier_path>', methods=['GET'])
+def zalo_verify(verifier_path):
+    """Zalo 域名归属验证"""
+    if verifier_path.endswith('.html') and 'zalo_verifier' in verifier_path:
+        token = verifier_path.replace('zalo_verifier', '').replace('.html', '')
+        html_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta property="zalo-platform-site-verification" content="{token}" />
+</head>
+<body>There Is No Limit To What You Can Accomplish Using Zalo!</body>
+</html>'''
+        return html_content, 200, {'Content-Type': 'text/html'}
+    return 'Not Found', 404
