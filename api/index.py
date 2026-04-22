@@ -1382,8 +1382,18 @@ def webhook_verify():
 
 
 @app.route('/webhook', methods=['POST'])
+def _process_message(user_id: str, text: str):
+    """后台线程处理消息（不阻塞 webhook 响应）"""
+    try:
+        reply = get_reply(user_id, text)
+        log.info(f"[BG] Reply: {reply[:80]}")
+        send_zalo_message(user_id, reply)
+    except Exception as e:
+        log.error(f"[BG] process_message error: {e}")
+
+
 def webhook_receive():
-    """接收 Zalo 推送事件"""
+    """接收 Zalo 推送事件 - 必须 <2s 内响应"""
     try:
         raw_body = request.get_data()
         data = json.loads(raw_body)
@@ -1400,22 +1410,20 @@ def webhook_receive():
             text    = data.get('message', {}).get('text', '')
             log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
             if user_id and text:
-                reply = get_reply(user_id, text)
-                log.info(f"Reply: {reply[:80]}")
-                send_zalo_message(user_id, reply)
+                # 立即返回 200，避免 Zalo 超时
+                # 实际处理放到后台线程
+                _bg_executor.submit(_process_message, user_id, text)
 
         elif event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"follow event: user_id={user_id}")
             if user_id:
-                # 新关注者初始化状态
                 set_user_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
-                send_zalo_message(user_id, SCRIPTS_MERCHANT['opening'])
+                _bg_executor.submit(send_zalo_message, user_id, SCRIPTS_MERCHANT['opening'])
 
         elif event_name == 'unfollow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"unfollow: user_id={user_id}")
-            # 可选：更新状态为 unfollowed
             if user_id:
                 set_user_state(user_id, {'conv_state': 'unfollowed'})
 
@@ -1424,6 +1432,7 @@ def webhook_receive():
         import traceback
         log.error(traceback.format_exc())
 
+    # 立即返回，不等待消息发送完成
     return jsonify({'status': 'ok'})
 
 
