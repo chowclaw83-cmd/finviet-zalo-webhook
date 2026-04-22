@@ -16,8 +16,18 @@ import logging
 import hmac
 import hashlib
 import requests
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
+
+# ── 异步任务线程池（fire-and-forget，不阻塞 webhook）─────────────────────
+from concurrent.futures import ThreadPoolExecutor
+_bg_executor = ThreadPoolExecutor(max_workers=3)
+
+# ── FAQ Extra 内存缓存（5分钟刷新一次，避免每次查 Supabase）─────────────
+_faq_extra_cache: dict = {}
+_faq_extra_cache_time: float = 0
+_FAQ_CACHE_TTL_SECONDS = 300
 
 # OpenAI SDK
 try:
@@ -85,83 +95,100 @@ def db_get_user_state(user_id: str) -> dict:
 
 
 def db_upsert_user_state(user_id: str, updates: dict):
-    """更新或创建用户状态"""
-    sb = get_supabase()
-    if not sb:
-        return
-    try:
-        row = {'user_id': user_id, 'updated_at': datetime.utcnow().isoformat(), **updates}
-        sb.table('zalo_user_states').upsert(row, on_conflict='user_id').execute()
-    except Exception as e:
-        log.error(f"db_upsert_user_state error: {e}")
+    """更新或创建用户状态（fire-and-forget）"""
+    def _do():
+        sb = get_supabase()
+        if not sb:
+            return
+        try:
+            row = {'user_id': user_id, 'updated_at': datetime.utcnow().isoformat(), **updates}
+            sb.table('zalo_user_states').upsert(row, on_conflict='user_id').execute()
+        except Exception as e:
+            log.error(f"db_upsert_user_state error: {e}")
+    _bg_executor.submit(_do)
 
 
 def db_log_message(user_id: str, direction: str, text: str,
                    matched_faq: str = None, matched_type: str = None,
                    user_type: str = 'merchant'):
-    """记录消息日志（direction: in/out）"""
-    sb = get_supabase()
-    if not sb:
-        return
-    try:
-        sb.table('zalo_message_logs').insert({
-            'user_id': user_id,
-            'direction': direction,
-            'text': text[:1000],
-            'matched_faq': matched_faq,
-            'matched_type': matched_type,
-            'user_type': user_type,
-            'created_at': datetime.utcnow().isoformat(),
-        }).execute()
-    except Exception as e:
-        log.error(f"db_log_message error: {e}")
+    """记录消息日志（fire-and-forget，不阻塞 webhook）"""
+    def _do():
+        sb = get_supabase()
+        if not sb:
+            return
+        try:
+            sb.table('zalo_message_logs').insert({
+                'user_id': user_id,
+                'direction': direction,
+                'text': text[:1000],
+                'matched_faq': matched_faq,
+                'matched_type': matched_type,
+                'user_type': user_type,
+                'created_at': datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception as e:
+            log.error(f"db_log_message error: {e}")
+    _bg_executor.submit(_do)
 
 
 def db_log_unmatched(user_id: str, text: str, user_type: str = 'merchant'):
-    """记录未命中关键词（后台可查看并转为FAQ）"""
-    sb = get_supabase()
-    if not sb:
-        return
-    try:
-        sb.table('zalo_unmatched_queries').insert({
-            'user_id': user_id,
-            'text': text[:500],
-            'user_type': user_type,
-            'status': 'pending',      # pending / converted / ignored
-            'created_at': datetime.utcnow().isoformat(),
-        }).execute()
-    except Exception as e:
-        log.error(f"db_log_unmatched error: {e}")
+    """记录未命中关键词（fire-and-forget）"""
+    def _do():
+        sb = get_supabase()
+        if not sb:
+            return
+        try:
+            sb.table('zalo_unmatched_queries').insert({
+                'user_id': user_id,
+                'text': text[:500],
+                'user_type': user_type,
+                'status': 'pending',
+                'created_at': datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception as e:
+            log.error(f"db_log_unmatched error: {e}")
+    _bg_executor.submit(_do)
 
 
 def db_save_lead(user_id: str, name: str, city: str, phone: str, user_type: str = 'merchant'):
-    """保存线索（商家留资 / 业务员报备）"""
-    sb = get_supabase()
-    if not sb:
-        return
-    try:
-        sb.table('zalo_leads').upsert({
-            'user_id': user_id,
-            'name': name,
-            'city': city,
-            'phone': phone,
-            'user_type': user_type,
-            'status': 'new',
-            'updated_at': datetime.utcnow().isoformat(),
-            'created_at': datetime.utcnow().isoformat(),
-        }, on_conflict='user_id').execute()
-    except Exception as e:
-        log.error(f"db_save_lead error: {e}")
+    """保存线索（fire-and-forget）"""
+    def _do():
+        sb = get_supabase()
+        if not sb:
+            return
+        try:
+            sb.table('zalo_leads').upsert({
+                'user_id': user_id,
+                'name': name,
+                'city': city,
+                'phone': phone,
+                'user_type': user_type,
+                'status': 'new',
+                'updated_at': datetime.utcnow().isoformat(),
+                'created_at': datetime.utcnow().isoformat(),
+            }, on_conflict='user_id').execute()
+        except Exception as e:
+            log.error(f"db_save_lead error: {e}")
+    _bg_executor.submit(_do)
 
 
 def db_get_faq_extra() -> dict:
-    """从 Supabase 读取后台新增的 FAQ 条目 {keyword: answer}"""
+    """从 Supabase 读取后台新增的 FAQ（5分钟缓存，避免每次查库）"""
+    global _faq_extra_cache, _faq_extra_cache_time
+    import time
+    now = time.time()
+    if _faq_extra_cache and (now - _faq_extra_cache_time) < _FAQ_CACHE_TTL_SECONDS:
+        return _faq_extra_cache
     sb = get_supabase()
     if not sb:
-        return {}
+        return _faq_extra_cache or {}
     try:
         res = sb.table('zalo_faq_extra').select('keyword,answer').eq('active', True).execute()
-        return {row['keyword'].lower(): row['answer'] for row in (res.data or [])}
+        _faq_extra_cache = {row['keyword'].lower(): row['answer'] for row in (res.data or [])}
+        _faq_extra_cache_time = now
+        return _faq_extra_cache
+    except Exception:
+        return _faq_extra_cache or {}
     except Exception as e:
         log.error(f"db_get_faq_extra error: {e}")
         return {}
