@@ -14,8 +14,8 @@
   ],
   "crons": [
     {
-      "path": "/health",
-      "schedule": "*/5 * * * *"
+      "path": "/cron/refresh-token",
+      "schedule": "0 * * * *"
     }
   ]
 }

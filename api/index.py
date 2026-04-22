@@ -17,7 +17,8 @@ import hmac
 import hashlib
 import requests
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
 # ── 异步任务线程池（fire-and-forget，不阻塞 webhook）─────────────────────
@@ -49,12 +50,72 @@ log = logging.getLogger(__name__)
 
 # ── 配置 ──────────────────────────────────────────
 VERIFY_TOKEN   = os.environ.get('ZALO_VERIFY_TOKEN', 'finviet_webhook_2026')
-APP_ID         = os.environ.get('ZALO_APP_ID', '')
-ACCESS_TOKEN   = os.environ.get('ZALO_ACCESS_TOKEN', '')
+APP_ID         = os.environ.get('ZALO_APP_ID', '1501034389927564920')
+APP_SECRET     = os.environ.get('ZALO_APP_SECRET', '')
+ACCESS_TOKEN   = os.environ.get('ZALO_ACCESS_TOKEN', '')  # 首次手动填入，之后自动刷新
+REFRESH_TOKEN_STORE = os.environ.get('ZALO_REFRESH_TOKEN', '')  # 用于自动刷新的 refresh token
 OA_SECRET      = os.environ.get('ZALO_OA_SECRET', '')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 SUPABASE_URL   = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY   = os.environ.get('SUPABASE_KEY', '')
+
+# ── Zalo Token 自动刷新（内存缓存）──────────────────────
+# access_token 缓存在函数实例生命周期内，过期前自动刷新
+_cached_token: str | None = None
+_token_expires_at: float = 0  # Unix 时间戳
+
+
+def _refresh_access_token() -> str | None:
+    """用 refresh_token 刷新 access_token，返回新 token 或 None"""
+    refresh_t = REFRESH_TOKEN_STORE or os.environ.get('ZALO_REFRESH_TOKEN', '')
+    app_id    = APP_ID or '1501034389927564920'
+    app_sec   = APP_SECRET or os.environ.get('ZALO_APP_SECRET', '')
+
+    if not refresh_t or not app_sec:
+        log.warning("Missing refresh_token or app_secret, cannot auto-refresh")
+        return None
+
+    try:
+        import urllib.request
+        import urllib.parse
+        data = json.dumps({
+            'app_id': app_id,
+            'app_secret': app_sec,
+            'refresh_token': refresh_t
+        }).encode()
+        req = urllib.request.Request(
+            'https://oauth.zaloapp.com/v4/oa/access_token',
+            data=data,
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {refresh_t}'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        if 'access_token' in result:
+            log.info(f"[TOKEN] Refreshed successfully, expires_in={result.get('expires_in')}")
+            return result['access_token']
+        else:
+            log.error(f"[TOKEN] Refresh failed: {result}")
+            return None
+    except Exception as e:
+        log.error(f"[TOKEN] Refresh error: {e}")
+        return None
+
+
+def get_access_token() -> str:
+    """获取当前可用的 access_token（自动刷新）"""
+    global _cached_token, _token_expires_at
+    now = time.time()
+    # 缓存有效且未过期（提前 5 分钟刷新）
+    if _cached_token and _token_expires_at > now + 300:
+        return _cached_token
+    # 尝试刷新
+    new_token = _refresh_access_token()
+    if new_token:
+        _cached_token = new_token
+        _token_expires_at = now + 7200  # Zalo access_token 通常 2 小时
+        return _cached_token
+    # 刷新失败，用环境变量里的旧 token
+    return ACCESS_TOKEN
 
 # OpenAI 客户端
 if OPENAI_API_KEY and OPENAI_AVAILABLE:
@@ -1318,12 +1379,13 @@ Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
 # ════════════════════════════════════════════════════════════
 
 def send_zalo_message(user_id: str, text: str):
-    """发送消息到 Zalo OA"""
-    if not ACCESS_TOKEN:
+    """发送消息到 Zalo OA（自动刷新 token）"""
+    token = get_access_token()
+    if not token:
         log.warning("No ACCESS_TOKEN, skip sending")
         return False
     url = "https://openapi.zalo.me/v3.0/oa/message/cs"
-    headers = {'access_token': ACCESS_TOKEN, 'Content-Type': 'application/json'}
+    headers = {'access_token': token, 'Content-Type': 'application/json'}
     payload = {
         "recipient": {"user_id": str(user_id)},
         "message": {"text": text}
@@ -1352,7 +1414,21 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     sb_ok = get_supabase() is not None
-    return jsonify({'status': 'ok', 'supabase': sb_ok, 'time': datetime.now().isoformat()})
+    return jsonify({'status': 'ok', 'supabase': sb_ok, 'time': datetime.now(timezone.utc).isoformat()})
+
+
+@app.route('/cron/refresh-token', methods=['POST', 'GET'])
+def cron_refresh_token():
+    """定时刷新 Zalo Access Token - Vercel Cron 或手动调用"""
+    try:
+        new_token = _refresh_access_token()
+        if new_token:
+            return jsonify({'status': 'refreshed', 'access_token_preview': new_token[:20] + '...'})
+        else:
+            return jsonify({'status': 'refresh_failed', 'reason': 'check logs'}), 500
+    except Exception as e:
+        log.error(f"Cron refresh error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/<path:verifier_path>', methods=['GET'])
