@@ -1382,16 +1382,6 @@ def webhook_verify():
 
 
 @app.route('/webhook', methods=['POST'])
-def _process_message(user_id: str, text: str):
-    """后台线程处理消息（不阻塞 webhook 响应）"""
-    try:
-        reply = get_reply(user_id, text)
-        log.info(f"[BG] Reply: {reply[:80]}")
-        send_zalo_message(user_id, reply)
-    except Exception as e:
-        log.error(f"[BG] process_message error: {e}")
-
-
 def webhook_receive():
     """接收 Zalo 推送事件 - 必须 <2s 内响应"""
     try:
@@ -1434,6 +1424,16 @@ def webhook_receive():
 
     # 立即返回，不等待消息发送完成
     return jsonify({'status': 'ok'})
+
+
+def _process_message(user_id: str, text: str):
+    """后台线程处理消息（不阻塞 webhook 响应）"""
+    try:
+        reply = get_reply(user_id, text)
+        log.info(f"[BG] Reply: {reply[:80]}")
+        send_zalo_message(user_id, reply)
+    except Exception as e:
+        log.error(f"[BG] process_message error: {e}")
 
 
 # ════════════════════════════════════════════════════════════
