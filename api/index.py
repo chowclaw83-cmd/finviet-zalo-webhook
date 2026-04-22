@@ -1183,8 +1183,8 @@ GPT_SYSTEM_SALESMAN = """Bạn là Bong Bong - trợ lý nội bộ của KINDLI
 - Luôn kết thúc bằng emoji"""
 
 
-def ask_gpt(user_message: str, user_type: str = 'merchant') -> str:
-    """调用 GPT-4 生成回复"""
+def ask_gpt(user_message: str, user_type: str = 'merchant') -> str | None:
+    """调用 GPT-4 生成回复（最多等 1.5s，超时则返回 None 触发 fallback）"""
     if not openai_client:
         return None
     system = GPT_SYSTEM_MERCHANT if user_type != 'salesman' else GPT_SYSTEM_SALESMAN
@@ -1196,7 +1196,8 @@ def ask_gpt(user_message: str, user_type: str = 'merchant') -> str:
                 {"role": "user", "content": user_message}
             ],
             max_tokens=350,
-            temperature=0.7
+            temperature=0.7,
+            timeout=1.5,   # 最多等1.5秒，避免阻塞 webhook
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -1383,7 +1384,7 @@ def webhook_verify():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_receive():
-    """接收 Zalo 推送事件 - 必须 <2s 内响应"""
+    """接收 Zalo 推送事件 - 同步生成回复，响应体内直接带消息内容"""
     try:
         raw_body = request.get_data()
         data = json.loads(raw_body)
@@ -1395,34 +1396,45 @@ def webhook_receive():
 
         event_name = data.get('event_name', '')
 
-        if event_name == 'user_send_text':
-            user_id = data.get('sender', {}).get('id', '')
-            text    = data.get('message', {}).get('text', '')
-            log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
-            if user_id and text:
-                # 立即返回 200，避免 Zalo 超时
-                # 实际处理放到后台线程
-                _bg_executor.submit(_process_message, user_id, text)
-
-        elif event_name == 'follow':
+        # ── follow：直接回复欢迎语 ─────────────────────────
+        if event_name == 'follow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"follow event: user_id={user_id}")
             if user_id:
                 set_user_state(user_id, {'user_type': 'merchant', 'conv_state': 'new'})
-                _bg_executor.submit(send_zalo_message, user_id, SCRIPTS_MERCHANT['opening'])
+                return jsonify({
+                    'recipient': {'id': str(user_id)},
+                    'message': {'text': SCRIPTS_MERCHANT['opening']}
+                })
 
+        # ── unfollow：只更新状态，不需要回复 ───────────────
         elif event_name == 'unfollow':
             user_id = data.get('follower', {}).get('id', '')
             log.info(f"unfollow: user_id={user_id}")
             if user_id:
                 set_user_state(user_id, {'conv_state': 'unfollowed'})
+            return jsonify({'status': 'ok'})
+
+        # ── user_send_text：同步生成回复并返回 ─────────────
+        elif event_name == 'user_send_text':
+            user_id = data.get('sender', {}).get('id', '')
+            text    = data.get('message', {}).get('text', '')
+            log.info(f"user_send_text: user_id={user_id}, text={text[:50]}")
+            if user_id and text:
+                # 同步获取回复（GPT 有 1.5s 超时保护）
+                reply = get_reply(user_id, text)
+                log.info(f"Reply: {reply[:80]}")
+                # 在响应体内直接带消息内容，Zalo 会自动推送
+                return jsonify({
+                    'recipient': {'id': str(user_id)},
+                    'message': {'text': reply}
+                })
 
     except Exception as e:
         log.error(f"Webhook error: {e}")
         import traceback
         log.error(traceback.format_exc())
 
-    # 立即返回，不等待消息发送完成
     return jsonify({'status': 'ok'})
 
 
