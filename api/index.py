@@ -1526,12 +1526,14 @@ _crm_zones_cache_time: float = 0
 _CRM_ZONES_CACHE_TTL: int = 1800  # 30分钟
 
 
-def crm_fetch_zones(city: str = '', keyword: str = '') -> list[dict]:
+def crm_fetch_zones(city: str = '', keyword: str = '', crm_user_id: str = '') -> list[dict]:
     """调用 CRM GET /api/zalo/crm/zones，返回 zones 列表
 
     参数：
     - city: 城市中文名或 code（如 "胡志明"、"HCM"），空则返回全部
     - keyword: 街区 code 或名称关键词
+    - crm_user_id: 当前 CRM 用户 ID（从 user state 读取）
+
     返回结构：[{id, code, level, sort_order, name_cn, name_vi, city_id, city}, ...]
     """
     global _crm_zones_cache, _crm_zones_cache_time
@@ -1549,6 +1551,10 @@ def crm_fetch_zones(city: str = '', keyword: str = '') -> list[dict]:
         headers = {
             'X-Zalo-Service-Key': CRM_SERVICE_KEY,
         }
+        # zones 接口需要 crm_user_id，从调用方传入或从 user state 兜底
+        if crm_user_id:
+            headers['X-Zalo-CRM-User-Id'] = crm_user_id
+
         params = {}
         if city:
             params['city'] = city
@@ -1563,12 +1569,15 @@ def crm_fetch_zones(city: str = '', keyword: str = '') -> list[dict]:
         )
         if resp.status_code == 200:
             result = resp.json()
-            zones = result.get('zones', [])
+            # API 返回结构：{ok, data: {items: [...], total: N}}
+            # 兼容：可能 data.items 或直接 zones
+            data_obj = result.get('data', {})
+            zones = data_obj.get('items') or result.get('zones', [])
             _crm_zones_cache = zones
             _crm_zones_cache_time = now
             return _filter_zones(zones, city, keyword)
         else:
-            log.warning(f"crm_fetch_zones: HTTP {resp.status_code}")
+            log.warning(f"crm_fetch_zones: HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         log.error(f"crm_fetch_zones error: {e}")
 
@@ -1576,13 +1585,23 @@ def crm_fetch_zones(city: str = '', keyword: str = '') -> list[dict]:
 
 
 def _filter_zones(zones: list[dict], city: str, keyword: str) -> list[dict]:
-    """对 zones 列表做本地过滤（API 已按 params 过滤，此处做兜底）"""
+    """对 zones 列表做本地过滤（API 已按 params 过滤，此处做兜底）
+
+    注意：API 返回的 city 字段可能是嵌套对象 {name_cn, name_vi, ...}，
+    也可能是字符串。两种情况都要兼容。
+    """
     result = zones
     if city:
         city_lower = city.lower()
-        result = [z for z in result
-                  if z.get('city', '').lower() == city_lower
-                  or z.get('city_id', '') == city]
+        def city_matches(z: dict) -> bool:
+            c = z.get('city')
+            if isinstance(c, dict):
+                return (c.get('name_cn', '').lower() == city_lower
+                        or c.get('name_vi', '').lower() == city_lower
+                        or c.get('code', '').lower() == city_lower)
+            # 字符串格式
+            return str(c or '').lower() == city_lower or z.get('city_id', '') == city
+        result = [z for z in result if city_matches(z)]
     if keyword:
         kw = keyword.lower()
         result = [z for z in result
@@ -1721,12 +1740,18 @@ Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
 # 目前使用 zone_text 降级方案：CRM API 提交时 zone_id=null, zone_text="<分区名>"
 # 如 CRM 侧已建 zones 表，将下方 UUID 替换为真实值即可。
 
-def _get_zones_by_city(city: str) -> list[dict]:
+def _get_zones_by_city(city: str, user_id: str = '') -> list[dict]:
     """按城市返回分区选项列表
-    优先调 CRM API；API 不可用时降级用硬编码 CRM_ZONES。
+    优先调 CRM API（带缓存）；API 不可用时降级用硬编码 CRM_ZONES。
     """
+    # 尝试从 user state 获取 crm_user_id（用于 zones 接口鉴权）
+    crm_user_id = ''
+    if user_id:
+        state = get_user_state(user_id)
+        crm_user_id = state.get('crm_user_id', '')
+
     # 优先走 API（带缓存）
-    zones = crm_fetch_zones(city=city)
+    zones = crm_fetch_zones(city=city, crm_user_id=crm_user_id)
     if zones:
         # API 返回的字段统一映射，保持与硬编码一致的内部格式
         return [{
@@ -1807,7 +1832,7 @@ def _crm_handle_report_zone(user_id: str, crm_user_id: str, text: str, text_lowe
     """处理 CRM 报备·分区选择步骤"""
     state = get_user_state(user_id)
     city = state.get('crm_report_city', '')
-    zones = _get_zones_by_city(city)
+    zones = _get_zones_by_city(city, user_id=user_id)
 
     selected_zone = None
     # 尝试匹配编号（1、2、3...）
@@ -2026,7 +2051,7 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
                                              '新增客户', 'đăng ký cửa hàng']):
             # 从业务员 profile 获取所属城市
             city = state.get('salesman_city', '')
-            zones = _get_zones_by_city(city)
+            zones = _get_zones_by_city(city, user_id=user_id)
             if zones:
                 lines = [f"{i+1}. {z['name_cn']}" for i, z in enumerate(zones)]
                 zone_menu = "回复对应编号（如「1」）或分区名称（如「A1」）："
