@@ -1681,6 +1681,7 @@ def get_reply(user_id: str, text: str) -> str:
     state = get_user_state(user_id)
     user_type = state.get('user_type', 'merchant')   # merchant | salesman
     conv_state = state.get('conv_state', 'new')       # new | started | waiting_info | done
+    log.info(f"[GET_REPLY] user={user_id}, text={text}, state={state}")
 
     # ── 1. 业务员注册检测（最高优先）──────────────────
     sal_info = parse_salesman_registration(text)
@@ -2110,10 +2111,13 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
         greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
                      'good morning', 'good afternoon', 'good evening', '你好', '您好']
         is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
+        log.info(f"[GREETING CHECK] conv_state={conv_state}, text_lower={text_lower}, is_pure_greeting={is_pure_greeting}")
         if is_pure_greeting:
             set_user_state(user_id, {'conv_state': 'started'})
             db_log_message(user_id, 'in', text, 'greeting', 'greeting', user_type)
-            return SCRIPTS_MERCHANT['opening']
+            opening = SCRIPTS_MERCHANT.get('opening', 'Hello! Mình là Bong Bong.')
+            log.info(f"[GREETING] returning: {opening[:50]}")
+            return opening
         # 新用户直接发问题
         set_user_state(user_id, {'conv_state': 'started'})
 
