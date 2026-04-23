@@ -1676,6 +1676,17 @@ def get_reply(user_id: str, text: str) -> str:
     text = text.strip()
     text_lower = text.lower()
 
+    # ── [HARDCODE] 新用户问候优先处理 ───────────────
+    greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
+                 'good morning', 'good afternoon', 'good evening', '你好', '您好']
+    if len(text_lower.split()) <= 4 and any(g in text_lower for g in greetings):
+        state = get_user_state(user_id)
+        if state.get('conv_state', 'new') == 'new':
+            set_user_state(user_id, {'conv_state': 'started', 'user_type': 'merchant'})
+            opening = SCRIPTS_MERCHANT.get('opening', 'Chào bạn! Mình là Bong Bong 😊')
+            send_zalo_message(user_id, opening)
+            return opening
+
     state = get_user_state(user_id)
     user_type = state.get('user_type', 'merchant')   # merchant | salesman
     conv_state = state.get('conv_state', 'new')       # new | started | waiting_info | done
@@ -2216,19 +2227,36 @@ def debug_reply():
 
 @app.route('/debug/greeting', methods=['GET'])
 def debug_greeting():
-    """直接测试 greeting 分支"""
+    """逐步模拟 get_reply 的 greeting 分支（不调用 get_reply 本身）"""
+    test_user = request.args.get('user', 'test_user_xyz')
+    test_text = request.args.get('text', 'hello')
+
+    state = get_user_state(test_user)
+    user_type = state.get('user_type', 'merchant')
+    conv_state = state.get('conv_state', 'new')
+    text_lower = test_text.lower()
+
     greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
                  'good morning', 'good afternoon', 'good evening', '你好', '您好']
-    text_lower = 'hello'
     is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
-    opening = SCRIPTS_MERCHANT.get('opening', 'FALLBACK_MISSING')
+
+    opening = SCRIPTS_MERCHANT.get('opening', 'KEY_MISSING')
+
+    # 直接走 greeting 路径（不调用 get_reply）
+    if is_pure_greeting:
+        direct_result = opening
+    else:
+        direct_result = None
+
     return jsonify({
+        'state': state,
+        'user_type': user_type,
+        'conv_state': conv_state,
         'text_lower': text_lower,
-        'greetings': greetings,
         'is_pure_greeting': is_pure_greeting,
-        'SCRIPTS_MERCHANT_keys': list(SCRIPTS_MERCHANT.keys()),
-        'opening_len': len(opening),
-        'opening_preview': opening[:100],
+        'opening_len': len(opening) if opening else 0,
+        'opening_preview': (opening or '')[:100],
+        'direct_greeting_result': direct_result,
     })
 
 
