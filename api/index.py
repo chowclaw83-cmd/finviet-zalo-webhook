@@ -1818,11 +1818,7 @@ def _crm_handle_list(crm_user_id: str) -> str:
     items = data.get('reports') or data.get('items') or []
     total = data.get('total', len(items))
     if not items:
-        return "📋 【我的客户】
-
-目前暂无报备记录。
-
-想报备新客户？发送「报备」开始！"
+        return "📋 【我的客户】\n\n目前暂无报备记录。\n\n想报备新客户？发送「报备」开始！"
     header = f"📋 【我的客户】（共 {total} 个）\n\n"
     lines = [_crm_format_report_item(item) for item in items[:8]]
     footer = f"\n输入「报备」可新增客户，输入「CRM」可筛选其他状态。"
@@ -1988,11 +1984,7 @@ def _crm_handle_claim_prompt(crm_user_id: str) -> str:
             lines.append(f"{idx}. 🟠[城市池] {item.get('store_name','?')} | {item.get('contact_value','')} | ID:{item['id'][:8]}")
             idx += 1
     if not lines:
-        return "📦 【认领客户】
-
-目前没有可认领的客户。
-
-团队池/城市池在保护期结束后会自动开放，届时再来查看。"
+        return "📦 【认领客户】\n\n目前没有可认领的客户。\n\n团队池/城市池在保护期结束后会自动开放，届时再来查看。"
 
     prompt = (
         "📦 【认领客户】（回复对应编号或 ID）\n\n"
@@ -2021,12 +2013,7 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
         if status == 200 and data:
             report = data.get('data') or {}
             set_user_state(crm_user_id, {'conv_state': 'started'})
-            return (f"✅ 认领成功！
-
-🏪 已认领客户 ID：{report_id[:8]}...
-🟢 进入你的个人保护期
-
-记得尽快联系客户完成签约！")
+            return (f"✅ 认领成功！\n\n🏪 已认领客户 ID：{report_id[:8]}...\n🟢 进入你的个人保护期\n\n记得尽快联系客户完成签约！")
         elif status == 403:
             return "⚠️ 认领失败：你没有权限认领此客户（可能仍处于 72 小时限制期内）。"
         elif status == 404:
