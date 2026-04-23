@@ -1814,8 +1814,9 @@ def _crm_handle_list(crm_user_id: str) -> str:
     data = crm_list_reports(crm_user_id, pool='mine', page=1, page_size=8)
     if data is None:
         return "⚠️ 暂时无法连接 CRM 系统，请稍后再试。"
-    items = data.get('items') or []
-    total = data.get('total', 0)
+    # CRM list 接口返回 reports[] 或 items[]，两者都要兼容
+    items = data.get('reports') or data.get('items') or []
+    total = data.get('total', len(items))
     if not items:
         return "📋 【我的客户】
 
@@ -1929,13 +1930,13 @@ def _crm_handle_report_step(user_id: str, crm_user_id: str, text: str, text_lowe
                 + "\n\n同一商户在保护期内无法重复报备。\n\n"
                 "如有问题请联系城市管理员。")
 
-    # zone_id=null 表示用 zone_text 降级，CRM 管理员后续可手动关联 zone_id
+    # zone_id / zone_text 已在函数开头从 state 读取，直接使用
     data, status = crm_create_report(
         crm_user_id, contact_name, store_name, contact_value,
         full_address,
         building_no=building_no, street_text=street_text,
-        zone_id=None,
-        zone_text=zone_text or state.get('crm_report_city', ''),
+        zone_id=zone_id,
+        zone_text=zone_text,
         notes='Zalo Bot 报备'
     )
     if status == 200 and data:
@@ -1974,12 +1975,16 @@ def _crm_handle_claim_prompt(crm_user_id: str) -> str:
     city_data = crm_list_reports(crm_user_id, pool='city_pool', page=1, page_size=5)
     lines = []
     idx = 1
-    if team_data and team_data.get('items'):
-        for item in team_data['items']:
+    # 兼容 reports[] 和 items[] 两种响应格式
+    def _get_items(d):
+        return d.get('reports') or d.get('items') or [] if d else []
+
+    if team_data:
+        for item in _get_items(team_data):
             lines.append(f"{idx}. 🟡[团队池] {item.get('store_name','?')} | {item.get('contact_value','')} | ID:{item['id'][:8]}")
             idx += 1
-    if city_data and city_data.get('items'):
-        for item in city_data['items']:
+    if city_data:
+        for item in _get_items(city_data):
             lines.append(f"{idx}. 🟠[城市池] {item.get('store_name','?')} | {item.get('contact_value','')} | ID:{item['id'][:8]}")
             idx += 1
     if not lines:
