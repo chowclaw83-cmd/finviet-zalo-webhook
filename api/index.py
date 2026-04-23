@@ -1683,9 +1683,7 @@ def get_reply(user_id: str, text: str) -> str:
         state = get_user_state(user_id)
         if state.get('conv_state', 'new') == 'new':
             set_user_state(user_id, {'conv_state': 'started', 'user_type': 'merchant'})
-            opening = SCRIPTS_MERCHANT.get('opening', 'Chào bạn! Mình là Bong Bong 😊')
-            send_zalo_message(user_id, opening)
-            return opening
+            return SCRIPTS_MERCHANT.get('opening', 'Chào bạn! Mình là Bong Bong 😊')
 
     state = get_user_state(user_id)
     user_type = state.get('user_type', 'merchant')   # merchant | salesman
