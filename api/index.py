@@ -2187,6 +2187,26 @@ def debug_send():
         'msg': test_msg,
     })
 
+@app.route('/debug/reply', methods=['GET'])
+def debug_reply():
+    """调试端点：直接测试 get_reply 逻辑"""
+    test_user = request.args.get('user', '9e6b4162-d41a-44aa-8573-12236436c222')
+    test_text = request.args.get('text', 'hello')
+    try:
+        reply = get_reply(test_user, test_text)
+        log.info(f"DEBUG reply: {reply[:100] if reply else 'EMPTY'}")
+        return jsonify({
+            'user': test_user,
+            'text': test_text,
+            'reply': reply or '(empty)',
+            'reply_len': len(reply) if reply else 0,
+        })
+    except Exception as e:
+        log.error(f"DEBUG reply error: {e}")
+        import traceback
+        log.error(traceback.format_exc())
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()})
+
 
 @app.route('/cron/refresh', methods=['POST', 'GET'])
 def cron_refresh_token():
