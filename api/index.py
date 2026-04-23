@@ -2201,7 +2201,16 @@ def debug_reply():
         state = get_user_state(test_user)
         user_type = state.get('user_type', 'merchant')
         conv_state = state.get('conv_state', 'new')
+        greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
+                     'good morning', 'good afternoon', 'good evening', '你好', '您好']
+        text_lower = test_text.lower()
+        is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
+        opening = SCRIPTS_MERCHANT.get('opening', 'FALLBACK_HELLO')
+        faq_ans, faq_key, match_type = faq_lookup(text_lower, user_type)
         log.info(f"DEBUG state: {state}")
+        log.info(f"DEBUG greeting: is_pure_greeting={is_pure_greeting}, conv_state={conv_state}")
+        log.info(f"DEBUG faq_lookup: ans={repr(faq_ans[:50] if faq_ans else None)}")
+        log.info(f"DEBUG SCRIPTS_MERCHANT opening: {opening[:50]}")
 
         reply = get_reply(test_user, test_text)
         log.info(f"DEBUG reply: {repr(reply[:200] if reply else 'EMPTY')}")
@@ -2218,6 +2227,9 @@ def debug_reply():
             'state': state,
             'user_type': user_type,
             'conv_state': conv_state,
+            'is_pure_greeting': is_pure_greeting,
+            'opening': opening[:100],
+            'faq_ans_found': bool(faq_ans),
             'reply': reply or '(empty)',
             'reply_len': len(reply) if reply else 0,
             'sent_to_user': sent,
