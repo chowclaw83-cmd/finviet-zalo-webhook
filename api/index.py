@@ -1520,6 +1520,78 @@ def crm_collision_check(crm_user_id: str, store_name: str, contact_value: str,
     return None
 
 
+# ── Zones 接口缓存（30分钟）──────────────────────────────
+_crm_zones_cache: dict | None = None
+_crm_zones_cache_time: float = 0
+_CRM_ZONES_CACHE_TTL: int = 1800  # 30分钟
+
+
+def crm_fetch_zones(city: str = '', keyword: str = '') -> list[dict]:
+    """调用 CRM GET /api/zalo/crm/zones，返回 zones 列表
+
+    参数：
+    - city: 城市中文名或 code（如 "胡志明"、"HCM"），空则返回全部
+    - keyword: 街区 code 或名称关键词
+    返回结构：[{id, code, level, sort_order, name_cn, name_vi, city_id, city}, ...]
+    """
+    global _crm_zones_cache, _crm_zones_cache_time
+
+    # 缓存命中（全局缓存，不区分 city/keyword，因为数据量小）
+    now = time.time()
+    if _crm_zones_cache is not None and (now - _crm_zones_cache_time) < _CRM_ZONES_CACHE_TTL:
+        return _filter_zones(_crm_zones_cache, city, keyword)
+
+    if not CRM_API_BASE or not CRM_SERVICE_KEY:
+        log.warning("crm_fetch_zones: CRM_API_BASE 或 CRM_SERVICE_KEY 未配置，跳过")
+        return []
+
+    try:
+        headers = {
+            'X-Zalo-Service-Key': CRM_SERVICE_KEY,
+        }
+        params = {}
+        if city:
+            params['city'] = city
+        if keyword:
+            params['keyword'] = keyword
+
+        resp = requests.get(
+            f"{CRM_API_BASE}/api/zalo/crm/zones",
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            zones = result.get('zones', [])
+            _crm_zones_cache = zones
+            _crm_zones_cache_time = now
+            return _filter_zones(zones, city, keyword)
+        else:
+            log.warning(f"crm_fetch_zones: HTTP {resp.status_code}")
+    except Exception as e:
+        log.error(f"crm_fetch_zones error: {e}")
+
+    return []
+
+
+def _filter_zones(zones: list[dict], city: str, keyword: str) -> list[dict]:
+    """对 zones 列表做本地过滤（API 已按 params 过滤，此处做兜底）"""
+    result = zones
+    if city:
+        city_lower = city.lower()
+        result = [z for z in result
+                  if z.get('city', '').lower() == city_lower
+                  or z.get('city_id', '') == city]
+    if keyword:
+        kw = keyword.lower()
+        result = [z for z in result
+                  if kw in z.get('code', '').lower()
+                  or kw in z.get('name_cn', '').lower()
+                  or kw in z.get('name_vi', '').lower()]
+    return result
+
+
 def crm_create_report(crm_user_id: str, contact_name: str, store_name: str,
                         contact_value: str, full_address: str,
                         building_no: str = '', street_text: str = '',
@@ -1650,7 +1722,20 @@ Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
 # 如 CRM 侧已建 zones 表，将下方 UUID 替换为真实值即可。
 
 def _get_zones_by_city(city: str) -> list[dict]:
-    """按城市返回分区选项列表"""
+    """按城市返回分区选项列表
+    优先调 CRM API；API 不可用时降级用硬编码 CRM_ZONES。
+    """
+    # 优先走 API（带缓存）
+    zones = crm_fetch_zones(city=city)
+    if zones:
+        # API 返回的字段统一映射，保持与硬编码一致的内部格式
+        return [{
+            'id': z.get('id', ''),
+            'code': z.get('code', ''),
+            'name_cn': z.get('name_cn', ''),
+        } for z in zones]
+
+    # 降级：硬编码兜底
     return CRM_ZONES.get(city, [])
 
 
