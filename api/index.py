@@ -2172,6 +2172,21 @@ def health():
     sb_ok = get_supabase() is not None
     return jsonify({'status': 'ok', 'supabase': sb_ok, 'time': datetime.now(timezone.utc).isoformat()})
 
+@app.route('/debug/send', methods=['GET'])
+def debug_send():
+    """调试端点：直接测试 send_zalo_message"""
+    test_user = request.args.get('user', '9e6b4162-d41a-44aa-8573-12236436c222')
+    test_msg = request.args.get('msg', '🫧 机器人在线测试消息')
+    token = os.environ.get('ZALO_ACCESS_TOKEN', '')
+    result = send_zalo_message(test_user, test_msg)
+    return jsonify({
+        'sent': result,
+        'token_len': len(token),
+        'token_prefix': token[:10] + '...' if token else 'EMPTY',
+        'user': test_user,
+        'msg': test_msg,
+    })
+
 
 @app.route('/cron/refresh', methods=['POST', 'GET'])
 def cron_refresh_token():
