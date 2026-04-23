@@ -2214,6 +2214,23 @@ def debug_reply():
         import traceback
         return jsonify({'error': str(e), 'trace': traceback.format_exc()})
 
+@app.route('/debug/greeting', methods=['GET'])
+def debug_greeting():
+    """直接测试 greeting 分支"""
+    greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
+                 'good morning', 'good afternoon', 'good evening', '你好', '您好']
+    text_lower = 'hello'
+    is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
+    opening = SCRIPTS_MERCHANT.get('opening', 'FALLBACK_MISSING')
+    return jsonify({
+        'text_lower': text_lower,
+        'greetings': greetings,
+        'is_pure_greeting': is_pure_greeting,
+        'SCRIPTS_MERCHANT_keys': list(SCRIPTS_MERCHANT.keys()),
+        'opening_len': len(opening),
+        'opening_preview': opening[:100],
+    })
+
 
 @app.route('/cron/refresh', methods=['POST', 'GET'])
 def cron_refresh_token():
