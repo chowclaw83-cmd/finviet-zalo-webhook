@@ -2193,18 +2193,34 @@ def debug_reply():
     test_user = request.args.get('user', '9e6b4162-d41a-44aa-8573-12236436c222')
     test_text = request.args.get('text', 'hello')
     try:
+        # 手动走一遍 get_reply 内部逻辑，逐步调试
+        state = get_user_state(test_user)
+        user_type = state.get('user_type', 'merchant')
+        conv_state = state.get('conv_state', 'new')
+        log.info(f"DEBUG state: {state}")
+
         reply = get_reply(test_user, test_text)
-        log.info(f"DEBUG reply: {reply[:100] if reply else 'EMPTY'}")
+        log.info(f"DEBUG reply: {repr(reply[:200] if reply else 'EMPTY')}")
+
+        # 直接发一条测试消息给用户
+        if reply:
+            sent = send_zalo_message(test_user, f"[DEBUG] 收到你的消息: {test_text}\n\nBot回复: {reply[:200]}")
+        else:
+            sent = False
+
         return jsonify({
             'user': test_user,
             'text': test_text,
+            'state': state,
+            'user_type': user_type,
+            'conv_state': conv_state,
             'reply': reply or '(empty)',
             'reply_len': len(reply) if reply else 0,
+            'sent_to_user': sent,
         })
     except Exception as e:
-        log.error(f"DEBUG reply error: {e}")
         import traceback
-        log.error(traceback.format_exc())
+        log.error(f"DEBUG reply error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e), 'trace': traceback.format_exc()})
 
 
@@ -2323,8 +2339,11 @@ def webhook_receive():
             if user_id and text:
                 # 走完整逻辑：FAQ + GPT 兜底
                 reply = get_reply(user_id, text)
-                log.info(f"Reply: {reply[:80]}")
-                send_zalo_message(user_id, reply)
+                log.info(f"Reply: {repr(reply[:200] if reply else 'EMPTY')}")
+                if reply:
+                    send_zalo_message(user_id, reply)
+                else:
+                    log.warning(f"[WEBHOOK] get_reply returned empty for user={user_id}, text={text}")
             return jsonify({'status': 'ok'})
 
     except Exception as e:
