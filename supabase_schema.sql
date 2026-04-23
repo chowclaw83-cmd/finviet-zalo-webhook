@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS zalo_faq_extra (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 6. 业务员通行证表（后台管理员手动增加，业务员用来登录）
+CREATE TABLE IF NOT EXISTS zalo_salesman_pass (
+    id              BIGSERIAL PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,    -- 用户名（如 kin）
+    credential      TEXT NOT NULL,           -- 密码/邮箱（如 abc@gmail.com）
+    real_name       TEXT,                    -- 真实姓名（可选，方便后台识别）
+    city            TEXT,                    -- 负责城市（可选）
+    active          BOOLEAN DEFAULT TRUE,    -- 是否启用
+    notes           TEXT,                    -- 备注
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pass_username ON zalo_salesman_pass(username);
+
 -- ============================================================
 -- Row Level Security（关闭，用 API Key 控制访问）
 -- ============================================================
@@ -77,3 +91,4 @@ ALTER TABLE zalo_message_logs   DISABLE ROW LEVEL SECURITY;
 ALTER TABLE zalo_leads          DISABLE ROW LEVEL SECURITY;
 ALTER TABLE zalo_unmatched_queries DISABLE ROW LEVEL SECURITY;
 ALTER TABLE zalo_faq_extra      DISABLE ROW LEVEL SECURITY;
+ALTER TABLE zalo_salesman_pass  DISABLE ROW LEVEL SECURITY;
