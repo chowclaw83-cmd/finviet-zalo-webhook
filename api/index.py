@@ -1143,6 +1143,30 @@ Bạn có thể chọn:
 Hoặc nhắn bất kỳ câu hỏi nào, mình sẽ cố gắng trả lời! 🫧"""
 }
 
+# ── CRM 分区数据（Bot 侧硬编码）────────────────────────────
+# 说明：这些 ID 对应 CRM zones 表的 UUID。
+# CRM 侧 zones 表配置完成后，可用 GET /api/zalo/zones 动态获取，此处可删。
+# 目前降级方案：zone_id=null, zone_text="<分区名>" 传给 CRM API。
+CRM_ZONES: dict[str, list[dict]] = {
+    '胡志明': [
+        {'id': 'zone-hcm-a1', 'code': 'A1', 'name_cn': 'A1区（金融/商业中心）'},
+        {'id': 'zone-hcm-a2', 'code': 'A2', 'name_cn': 'A2区（商业/零售）'},
+        {'id': 'zone-hcm-a3', 'code': 'A3', 'name_cn': 'A3区（旅游商业）'},
+        {'id': 'zone-hcm-b1', 'code': 'B1', 'name_cn': 'B1区（新兴商业区）'},
+        {'id': 'zone-hcm-b2', 'code': 'B2', 'name_cn': 'B2区（居民+商业混合）'},
+        {'id': 'zone-hcm-c1', 'code': 'C1', 'name_cn': 'C1区（新兴区域/城郊）'},
+        {'id': 'zone-hcm-c2', 'code': 'C2', 'name_cn': 'C2区（新建商业区）'},
+        {'id': 'zone-hcm-other', 'code': 'OTHER', 'name_cn': '其他分区'},
+    ],
+    '海防': [
+        {'id': 'zone-hp-s', 'code': 'S', 'name_cn': 'S级区（核心商圈）'},
+        {'id': 'zone-hp-a', 'code': 'A', 'name_cn': 'A级区（主要商业街）'},
+        {'id': 'zone-hp-b', 'code': 'B', 'name_cn': 'B级区（居民区商业）'},
+        {'id': 'zone-hp-c', 'code': 'C', 'name_cn': 'C级区（新兴/城郊）'},
+        {'id': 'zone-hp-other', 'code': 'OTHER', 'name_cn': '其他分区'},
+    ],
+}
+
 # 业务员开场白/专属脚本
 SCRIPTS_SALESMAN = {
     'welcome': """Chào {name}! 👋 Đã xác nhận bạn là nhân viên kinh doanh ECO.
@@ -1619,6 +1643,32 @@ Bạn gửi lại theo đúng định dạng nhé:
 
 Ví dụ: 「Nguyễn Văn A, TP.HCM, 0901234567」"""
 
+# ── CRM 分区配置（Bot 侧硬编码，映射到 CRM zones 表）────────
+# 说明：这些 ID 对应 CRM zones 表的实际 UUID，
+#       等 CRM 侧 zones 表正式配置后可用 /api/zalo/zones 动态获取。
+# 目前使用 zone_text 降级方案：CRM API 提交时 zone_id=null, zone_text="<分区名>"
+# 如 CRM 侧已建 zones 表，将下方 UUID 替换为真实值即可。
+
+def _get_zones_by_city(city: str) -> list[dict]:
+    """按城市返回分区选项列表"""
+    return CRM_ZONES.get(city, [])
+
+
+def _format_zone_options(city: str, selected_city: str) -> str:
+    """格式化分区选择菜单"""
+    zones = _get_zones_by_city(selected_city)
+    if not zones:
+        return ("📍 分区：直接回复分区编号或名称\n\n"
+                "分区说明：\n"
+                "• A级区 - 核心商业区，高客流\n"
+                "• B级区 - 次核心，商业+居民混合\n"
+                "• C级区 - 新兴区域，潜力大\n\n"
+                "请回复分区（如「A1」或「B2」）：")
+    lines = [f"{i+1}. {z['name_cn']}" for i, z in enumerate(zones)]
+    return ("📍 选择分区：\n\n" + '\n'.join(lines) +
+            "\n\n回复对应编号（如「1」）或分区名称（如「A1」）：")
+
+
 # ── CRM 业务处理函数 ─────────────────────────────────────
 
 def _crm_format_report_item(item: dict) -> str:
@@ -1668,82 +1718,139 @@ def _crm_handle_list(crm_user_id: str) -> str:
     return header + '\n'.join(lines) + footer
 
 
+def _crm_handle_report_zone(user_id: str, crm_user_id: str, text: str, text_lower: str) -> str:
+    """处理 CRM 报备·分区选择步骤"""
+    state = get_user_state(user_id)
+    city = state.get('crm_report_city', '')
+    zones = _get_zones_by_city(city)
+
+    selected_zone = None
+    # 尝试匹配编号（1、2、3...）
+    digits_match = re.match(r'^(\d+)$', text.strip())
+    if digits_match:
+        idx = int(digits_match.group(1)) - 1
+        if 0 <= idx < len(zones):
+            selected_zone = zones[idx]
+
+    # 尝试匹配分区代码或名称
+    if not selected_zone:
+        for z in zones:
+            if (z['code'].lower() == text_lower.strip() or
+                    z['name_cn'] in text or
+                    z['code'].lower() in text_lower):
+                selected_zone = z
+                break
+
+    if not selected_zone:
+        # 手动输入分区名（降级：记作 zone_text）
+        zone_text_raw = text.strip()
+        if len(zone_text_raw) < 1:
+            return "❌ 分区不能为空，请重新选择或输入分区名称。"
+        set_user_state(user_id, {
+            'conv_state': 'crm_report',
+            'crm_report_zone_id': None,
+            'crm_report_zone_text': zone_text_raw,
+        })
+        zone_confirm = zone_text_raw
+    else:
+        set_user_state(user_id, {
+            'conv_state': 'crm_report',
+            'crm_report_zone_id': selected_zone['id'],
+            'crm_report_zone_text': selected_zone['name_cn'],
+        })
+        zone_confirm = selected_zone['name_cn']
+
+    return ("📋 【CRM 报备】\n\n"
+            f"✅ 分区：{zone_confirm}（城市：{city}）\n\n"
+            "现在请依次回复（用逗号或换行分隔）：\n\n"
+            "1️⃣ 商户名称\n   例如：Cà Phê Sài Gòn\n\n"
+            "2️⃣ 手机号 / Zalo\n   例如：0901234567\n\n"
+            "3️⃣ 详细地址（选填）\n\n"
+            "4️⃣ 联系人姓名（选填）\n\n"
+            "💡 报备成功后自动进入个人保护期！")
+
+
 def _crm_handle_report_step(user_id: str, crm_user_id: str, text: str, text_lower: str) -> str:
-    """处理 CRM 报备多步输入"""
-    # 解析用户输入：支持换行/逗号分隔
+    """处理 CRM 报备·商户信息收集步骤"""
+    state = get_user_state(user_id)
+    zone_id = state.get('crm_report_zone_id')
+    zone_text = state.get('crm_report_zone_text', '')
+
     parts = re.split(r'[,，\n]+', text)
     parts = [p.strip() for p in parts if p.strip()]
     if len(parts) < 2:
-        return ("📋 【CRM 报备】
+        return ("📋 【CRM 报备】\n\n"
+                "信息不够，请再补充：\n\n"
+                "至少需要：\n"
+                "1️⃣ 商户名称\n"
+                "2️⃣ 手机号 / Zalo\n\n"
+                "地址和联系人可以之后补充 😊")
 
-信息不够，请再补充一下：
-
-至少需要：
-1️⃣ 商户名称
-2️⃣ 手机号 / Zalo
-
-地址和联系人可以之后补充 😊")
     store_name = parts[0]
     contact_value = ''
     full_address = ''
     contact_name = ''
     for part in parts[1:]:
-        # 简单判断：数字为主的当电话，其他当地址
         digits = re.sub(r'\D', '', part)
         if len(digits) >= 8:
             contact_value = part
         elif len(part) > 5 and not contact_value:
-            # 没有电话时，第一个非名字的非短文本当地址
             contact_value = part
         else:
             contact_name = part
 
-    # 先防撞检查
+    # 解析地址（building_no + street_text）
+    building_no = ''
+    street_text = ''
+    m = re.match(r'^(\d+)\s+(.+)', full_address)
+    if m:
+        building_no, street_text = m.group(1), m.group(2)
+
+    # 提交前防撞检查
     collision = crm_collision_check(crm_user_id, store_name, contact_value)
     if collision and collision.get('has_collision'):
         stage = collision.get('stage', 'protected')
         owner_name = collision.get('owner_name', '')
         stage_text = '个人保护期' if stage == 'protected' else '团队池保护期'
-        return f"⚠️ 防撞提示：
+        return (f"⚠️ 防撞提示：\n\n"
+                f"该客户「{store_name}」已被报备！\n"
+                f"当前处于 {stage_text}"
+                + (f"\n归属业务员：{owner_name}" if owner_name else "")
+                + "\n\n同一商户在保护期内无法重复报备。\n\n"
+                "如有问题请联系城市管理员。")
 
-该客户「{store_name}」已被报备！
-当前处于 {stage_text}
-" + (f"归属业务员：{owner_name}\n" if owner_name else "") + """
-同一商户在保护期内无法重复报备。
-
-如有问题，请联系你的城市管理员。"""
-
-    # 提交报备
+    # zone_id=null 表示用 zone_text 降级，CRM 管理员后续可手动关联 zone_id
     data, status = crm_create_report(
         crm_user_id, contact_name, store_name, contact_value,
-        full_address, notes='Zalo Bot 报备'
+        full_address,
+        building_no=building_no, street_text=street_text,
+        zone_id=None,
+        zone_text=zone_text or state.get('crm_report_city', ''),
+        notes='Zalo Bot 报备'
     )
     if status == 200 and data:
         report = data.get('data') or {}
-        report_id = report.get('id', '')
         until_str = report.get('personal_protection_until', '')
         if until_str:
-            from datetime import datetime as dt
             try:
-                until_dt = dt.fromisoformat(until_str.replace('Z', '+00:00'))
+                until_dt = datetime.fromisoformat(until_str.replace('Z', '+00:00'))
                 until_text = until_dt.strftime('%Y-%m-%d')
             except Exception:
-                until_text = until_str[:10] if until_str else '未知'
+                until_text = until_str[:10] if until_str else '约14天后'
         else:
             until_text = '约14天后'
         set_user_state(user_id, {'conv_state': 'started'})
-        return (f"✅ 报备成功！
-
-🏪 商户：{store_name}
-📱 手机：{contact_value}
-🟢 状态：个人保护期
-📅 保护期至：{until_text}
-
-保护期内其他业务员无法抢占此客户！
-
-输入「我的客户」可查看所有报备记录。")
+        return (f"✅ 报备成功！\n\n"
+                f"🏪 商户：{store_name}\n"
+                f"📱 手机：{contact_value}\n"
+                f"📍 分区：{zone_text or '未选择'}\n"
+                f"🟢 状态：个人保护期\n"
+                f"📅 保护期至：{until_text}\n\n"
+                "保护期内其他业务员无法抢占此客户！\n\n"
+                "输入「我的客户」可查看所有报备记录。")
     elif status == 409:
-        return f"⚠️ 报备失败：该客户「{store_name}」已在保护期内，无法重复报备。"
+        return (f"⚠️ 报备失败：\n\n"
+                f"客户「{store_name}」已在保护期内，无法重复报备。")
     else:
         err = data.get('error', '未知错误') if data else '网络错误'
         return f"❌ 报备失败：{err}\n\n请稍后再试，或联系城市管理员。"
@@ -1832,25 +1939,28 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
         # ── 3b. CRM 报备新客户 ───────────────────────────
         if any(kw in text_lower for kw in ['bao cao', '报备', 'báo cáo cửa hàng',
                                              '新增客户', 'đăng ký cửa hàng']):
-            set_user_state(user_id, {'conv_state': 'crm_report'})
+            # 从业务员 profile 获取所属城市
+            city = state.get('salesman_city', '')
+            zones = _get_zones_by_city(city)
+            if zones:
+                lines = [f"{i+1}. {z['name_cn']}" for i, z in enumerate(zones)]
+                zone_menu = "回复对应编号（如「1」）或分区名称（如「A1」）："
+                zone_prompt = ("📋 【CRM 报备】\n\n"
+                               + "请先选择分区（你的城市：" + city + "）：\n\n"
+                               + '\n'.join(lines) + "\n\n" + zone_prompt)
+            else:
+                zone_prompt = ("直接回复分区名称（如「A1」「B2」）：\n\n"
+                               "• A级区 - 核心商业区\n• B级区 - 新兴/居民混合\n• C级区 - 城郊/新兴区域\n• 其他 - 输入「其他」")
+                zone_prompt = ("📋 【CRM 报备】\n\n"
+                               "请选择分区（城市：" + city + "）：\n\n" + zone_prompt)
+            set_user_state(user_id, {
+                'conv_state': 'crm_report_zone',
+                'crm_report_city': city,
+                'crm_report_zone_id': None,
+                'crm_report_zone_text': '',
+            })
             db_log_message(user_id, 'in', text, 'crm_report_start', 'crm', user_type)
-            return """📋 【CRM 报备】
-
-请按顺序回复以下信息（用逗号或换行分隔）：
-
-1️⃣ 商户名称
-   例如：Cà Phê Sài Gòn
-
-2️⃣ 手机号 / Zalo
-   例如：0901234567
-
-3️⃣ 详细地址
-   例如：123 Lê Lợi, Quận 1, TP.HCM
-
-4️⃣ 联系人姓名（选填）
-
----
-💡 报备成功后自动进入保护期，其他人无法抢占！"""
+            return zone_prompt
 
         # ── 3c. CRM 认领客户 ─────────────────────────────
         if any(kw in text_lower for kw in ['nhận khách', 'claim', '认领', '抢客户',
@@ -1859,7 +1969,10 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
             db_log_message(user_id, 'in', text, 'crm_claim_start', 'crm', user_type)
             return _crm_handle_claim_prompt(crm_user_id)
 
-        # ── 3d. CRM 多步对话（正在报备 / 认领中）──────────
+        # ── 3d. CRM 多步对话（报备·选分区中）─────────────
+        if conv_state == 'crm_report_zone':
+            return _crm_handle_report_zone(user_id, crm_user_id, text, text_lower)
+        # ── 3e. CRM 多步对话（报备·收集信息中）───────────
         if conv_state == 'crm_report':
             return _crm_handle_report_step(user_id, crm_user_id, text, text_lower)
         if conv_state == 'crm_claim':
