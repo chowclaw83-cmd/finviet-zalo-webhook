@@ -255,11 +255,9 @@ def db_get_faq_extra() -> dict:
         _faq_extra_cache = {row['keyword'].lower(): row['answer'] for row in (res.data or [])}
         _faq_extra_cache_time = now
         return _faq_extra_cache
-    except Exception:
-        return _faq_extra_cache or {}
     except Exception as e:
         log.error(f"db_get_faq_extra error: {e}")
-        return {}
+        return _faq_extra_cache or {}
 
 
 # ════════════════════════════════════════════════════════════
@@ -1681,7 +1679,6 @@ def get_reply(user_id: str, text: str) -> str:
     state = get_user_state(user_id)
     user_type = state.get('user_type', 'merchant')   # merchant | salesman
     conv_state = state.get('conv_state', 'new')       # new | started | waiting_info | done
-    log.info(f"[GET_REPLY] user={user_id}, text={text}, state={state}")
 
     # ── 1. 业务员注册检测（最高优先）──────────────────
     sal_info = parse_salesman_registration(text)
@@ -2111,13 +2108,16 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
         greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
                      'good morning', 'good afternoon', 'good evening', '你好', '您好']
         is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
-        log.info(f"[GREETING CHECK] conv_state={conv_state}, text_lower={text_lower}, is_pure_greeting={is_pure_greeting}")
         if is_pure_greeting:
-            set_user_state(user_id, {'conv_state': 'started'})
-            db_log_message(user_id, 'in', text, 'greeting', 'greeting', user_type)
-            opening = SCRIPTS_MERCHANT.get('opening', 'Hello! Mình là Bong Bong.')
-            log.info(f"[GREETING] returning: {opening[:50]}")
-            return opening
+            try:
+                set_user_state(user_id, {'conv_state': 'started'})
+            except Exception as e:
+                log.error(f"[GREETING] set_user_state failed: {e}")
+            try:
+                db_log_message(user_id, 'in', text, 'greeting', 'greeting', user_type)
+            except Exception as e:
+                log.error(f"[GREETING] db_log_message failed: {e}")
+            return SCRIPTS_MERCHANT['opening']
         # 新用户直接发问题
         set_user_state(user_id, {'conv_state': 'started'})
 
@@ -2134,7 +2134,7 @@ def _crm_handle_claim_resolve(crm_user_id: str, text: str, text_lower: str) -> s
     db_log_message(user_id, 'in', text, 'default', 'fallback', user_type)
     if user_type == 'salesman':
         return SCRIPTS_SALESMAN['default']
-    return SCRIPTS_MERCHANT['default']
+    return SCRIPTS_MERCHANT['default'] or 'Xin chào! Mình là Bong Bong 😊'
 
 
 # ════════════════════════════════════════════════════════════
@@ -2193,50 +2193,25 @@ def debug_send():
 
 @app.route('/debug/reply', methods=['GET'])
 def debug_reply():
-    """调试端点：直接测试 get_reply 逻辑"""
+    """调试端点：直接测试 get_reply + send_zalo_message"""
     test_user = request.args.get('user', '9e6b4162-d41a-44aa-8573-12236436c222')
     test_text = request.args.get('text', 'hello')
     try:
-        # 手动走一遍 get_reply 内部逻辑，逐步调试
         state = get_user_state(test_user)
-        user_type = state.get('user_type', 'merchant')
-        conv_state = state.get('conv_state', 'new')
-        greetings = ['xin chào', 'hello', 'hi', 'chào', 'bạn ơi', 'cảm ơn',
-                     'good morning', 'good afternoon', 'good evening', '你好', '您好']
-        text_lower = test_text.lower()
-        is_pure_greeting = any(g in text_lower for g in greetings) and len(text_lower.split()) <= 4
-        opening = SCRIPTS_MERCHANT.get('opening', 'FALLBACK_HELLO')
-        faq_ans, faq_key, match_type = faq_lookup(text_lower, user_type)
-        log.info(f"DEBUG state: {state}")
-        log.info(f"DEBUG greeting: is_pure_greeting={is_pure_greeting}, conv_state={conv_state}")
-        log.info(f"DEBUG faq_lookup: ans={repr(faq_ans[:50] if faq_ans else None)}")
-        log.info(f"DEBUG SCRIPTS_MERCHANT opening: {opening[:50]}")
-
         reply = get_reply(test_user, test_text)
-        log.info(f"DEBUG reply: {repr(reply[:200] if reply else 'EMPTY')}")
-
-        # 直接发一条测试消息给用户
         if reply:
-            sent = send_zalo_message(test_user, f"[DEBUG] 收到你的消息: {test_text}\n\nBot回复: {reply[:200]}")
+            sent = send_zalo_message(test_user, f"[DEBUG] 收到: {test_text}\n\nBot回复: {reply[:300]}")
         else:
             sent = False
-
         return jsonify({
-            'user': test_user,
-            'text': test_text,
+            'user': test_user, 'text': test_text,
             'state': state,
-            'user_type': user_type,
-            'conv_state': conv_state,
-            'is_pure_greeting': is_pure_greeting,
-            'opening': opening[:100],
-            'faq_ans_found': bool(faq_ans),
             'reply': reply or '(empty)',
             'reply_len': len(reply) if reply else 0,
             'sent_to_user': sent,
         })
     except Exception as e:
         import traceback
-        log.error(f"DEBUG reply error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e), 'trace': traceback.format_exc()})
 
 
