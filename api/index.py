@@ -59,9 +59,12 @@ OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 SUPABASE_URL   = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY   = os.environ.get('SUPABASE_KEY', '')
 
-# ── CRM 主系统对接配置 ────────────────────────────────
-CRM_API_BASE    = os.environ.get('CRM_API_BASE', 'https://merchant-visit-mvp.vercel.app')
-CRM_SERVICE_KEY = os.environ.get('CRM_SERVICE_KEY', '')  # 与 CRM 的 service-to-service 密钥
+# ── CRM 主系统对接配置（读 handoff 文档保持一致）─────────────
+# Bot 侧环境变量名：CRMAPIBASE / CRMSERVICEKEY
+CRM_API_BASE    = os.environ.get('CRMAPIBASE',
+                                  os.environ.get('CRM_API_BASE', ''))
+CRM_SERVICE_KEY = os.environ.get('CRMSERVICEKEY',
+                                  os.environ.get('CRM_SERVICE_KEY', ''))
 
 # ── Zalo Token 自动刷新（内存缓存）──────────────────────
 # access_token 缓存在函数实例生命周期内，过期前自动刷新
